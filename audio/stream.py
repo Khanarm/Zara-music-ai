@@ -19,18 +19,9 @@ logger = logging.getLogger(__name__)
 
 class AudioStream:
     """
-    Telegram VC media engine for Zara.
+    Zara Telegram Voice Chat media engine.
 
-    Compatible with the current PyTgCalls MediaStream API.
-
-    Responsibilities:
-        - Play audio
-        - Play video
-        - Pause
-        - Resume
-        - Stop
-        - Leave VC
-        - Track currently playing media
+    Uses the installed PyTgCalls MediaStream API.
     """
 
     def __init__(
@@ -51,17 +42,18 @@ class AudioStream:
     # ========================================================
 
     async def start(self) -> None:
-        """
-        Start PyTgCalls.
-        """
+        """Start PyTgCalls."""
 
         try:
             await self.calls.start()
-            logger.info("PyTgCalls started successfully")
+
+            logger.info(
+                "PyTgCalls started successfully."
+            )
 
         except Exception:
             logger.exception(
-                "Failed to start PyTgCalls"
+                "Failed to start PyTgCalls."
             )
             raise
 
@@ -74,22 +66,17 @@ class AudioStream:
         chat_id: int,
     ) -> bool:
         """
-        Join an active Telegram voice chat.
+        Prepare Zara for VC usage.
 
-        NOTE:
-        The old RecordStream based implementation is removed
-        because RecordStream is not available in the installed
-        PyTgCalls version.
+        RecordStream is intentionally NOT used because it is
+        unavailable in the installed PyTgCalls version.
 
-        If the project needs microphone/input capture later,
-        that will be implemented separately using the correct
-        PyTgCalls receiver API.
+        Actual VC connection happens when MediaStream is played.
         """
 
         chat_id = int(chat_id)
 
         try:
-            # If already connected, nothing to do.
             if chat_id in self.connected_chats:
                 logger.info(
                     "Already connected to VC: %s",
@@ -97,17 +84,8 @@ class AudioStream:
                 )
                 return True
 
-            # PyTgCalls joins the voice chat when a media stream
-            # is played. There is no RecordStream here.
-            #
-            # Do NOT call:
-            #   self.calls.record(...)
-            #
-            # because RecordStream does not exist in the
-            # installed PyTgCalls package.
-
             logger.info(
-                "Preparing Zara VC connection for %s",
+                "VC ready for chat: %s",
                 chat_id,
             )
 
@@ -122,24 +100,20 @@ class AudioStream:
 
         except Exception:
             logger.exception(
-                "Failed preparing VC connection %s",
+                "Failed preparing VC %s",
                 chat_id,
             )
             return False
 
     # ========================================================
-    # STOP RECORDING / CONNECTION STATE
+    # STOP RECORDING
     # ========================================================
 
     async def stop_recording(
         self,
         chat_id: int,
     ) -> None:
-        """
-        Stop receiver/recording state.
-
-        Kept for compatibility with existing callers.
-        """
+        """Clear VC connection state."""
 
         chat_id = int(chat_id)
 
@@ -148,7 +122,7 @@ class AudioStream:
         )
 
     # ========================================================
-    # PLAY
+    # PLAY AUDIO / VIDEO
     # ========================================================
 
     async def play(
@@ -159,14 +133,14 @@ class AudioStream:
         video: bool = False,
     ) -> bool:
         """
-        Play an audio or video file in Telegram VC.
+        Play an audio or video file in a Telegram VC.
         """
 
         chat_id = int(chat_id)
 
         if not media_path:
             logger.error(
-                "Media path is empty"
+                "Media path is empty."
             )
             return False
 
@@ -179,31 +153,25 @@ class AudioStream:
 
         try:
             # ------------------------------------------------
-            # Build MediaStream
+            # MediaStream
             # ------------------------------------------------
 
-            if video:
-                stream = MediaStream(
-                    media_path,
-                )
-
-                media_type = "video"
-
-            else:
-                stream = MediaStream(
-                    media_path,
-                )
-
-                media_type = "audio"
+            stream = MediaStream(
+                media_path
+            )
 
             # ------------------------------------------------
-            # Start playback
+            # Play
             # ------------------------------------------------
 
             await self.calls.play(
                 chat_id,
                 stream,
             )
+
+            # ------------------------------------------------
+            # State
+            # ------------------------------------------------
 
             self.connected_chats.add(
                 chat_id
@@ -215,11 +183,15 @@ class AudioStream:
 
             self.current_media[
                 chat_id
-            ] = media_type
+            ] = (
+                "video"
+                if video
+                else "audio"
+            )
 
             logger.info(
-                "Started %s playback in %s: %s",
-                media_type,
+                "Playing %s in VC %s: %s",
+                "video" if video else "audio",
                 chat_id,
                 media_path,
             )
@@ -235,7 +207,7 @@ class AudioStream:
 
         except Exception:
             logger.exception(
-                "Failed playing media in %s",
+                "Failed playing media in VC %s",
                 chat_id,
             )
             return False
@@ -249,10 +221,7 @@ class AudioStream:
         chat_id: int,
     ) -> bool:
         """
-        Stop current playback.
-
-        Zara remains connected only if another component
-        manages the VC connection separately.
+        Stop playback and leave the VC.
         """
 
         chat_id = int(chat_id)
@@ -277,7 +246,7 @@ class AudioStream:
             )
 
             logger.info(
-                "Stopped VC stream and left %s",
+                "Left VC: %s",
                 chat_id,
             )
 
@@ -302,7 +271,7 @@ class AudioStream:
 
         except Exception:
             logger.exception(
-                "Failed stopping stream in %s",
+                "Failed stopping VC %s",
                 chat_id,
             )
             return False
@@ -315,9 +284,7 @@ class AudioStream:
         self,
         chat_id: int,
     ) -> bool:
-        """
-        Pause current media.
-        """
+        """Pause current media."""
 
         chat_id = int(chat_id)
 
@@ -327,7 +294,7 @@ class AudioStream:
             )
 
             logger.info(
-                "Paused stream in %s",
+                "Paused media in VC %s",
                 chat_id,
             )
 
@@ -335,7 +302,7 @@ class AudioStream:
 
         except Exception:
             logger.exception(
-                "Failed pausing stream in %s",
+                "Failed pausing media in %s",
                 chat_id,
             )
             return False
@@ -348,9 +315,7 @@ class AudioStream:
         self,
         chat_id: int,
     ) -> bool:
-        """
-        Resume current media.
-        """
+        """Resume current media."""
 
         chat_id = int(chat_id)
 
@@ -360,7 +325,7 @@ class AudioStream:
             )
 
             logger.info(
-                "Resumed stream in %s",
+                "Resumed media in VC %s",
                 chat_id,
             )
 
@@ -368,7 +333,7 @@ class AudioStream:
 
         except Exception:
             logger.exception(
-                "Failed resuming stream in %s",
+                "Failed resuming media in %s",
                 chat_id,
             )
             return False
@@ -381,16 +346,14 @@ class AudioStream:
         self,
         chat_id: int,
     ) -> bool:
-        """
-        Leave Telegram VC.
-        """
+        """Leave VC."""
 
         return await self.stop(
             chat_id
         )
 
     # ========================================================
-    # STATE
+    # STATUS
     # ========================================================
 
     def is_playing(
@@ -439,19 +402,21 @@ class AudioStream:
         video: bool = False,
     ) -> bool:
         """
-        Change currently playing media.
+        Replace the currently playing media.
         """
 
         chat_id = int(chat_id)
 
         if self.is_playing(chat_id):
+
             try:
                 await self.calls.leave_call(
                     chat_id
                 )
+
             except Exception:
                 logger.debug(
-                    "Could not leave previous stream %s",
+                    "Failed leaving old stream %s",
                     chat_id,
                     exc_info=True,
                 )
@@ -481,9 +446,7 @@ class AudioStream:
     # ========================================================
 
     async def cleanup(self) -> None:
-        """
-        Clean up all active streams.
-        """
+        """Clean up all active VC sessions."""
 
         chat_ids = set(
             self.current_streams.keys()
@@ -494,6 +457,7 @@ class AudioStream:
         )
 
         for chat_id in list(chat_ids):
+
             try:
                 await self.calls.leave_call(
                     int(chat_id)
@@ -511,5 +475,5 @@ class AudioStream:
         self.connected_chats.clear()
 
         logger.info(
-            "AudioStream cleanup completed"
-            )
+            "AudioStream cleanup completed."
+    )
