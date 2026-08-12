@@ -270,7 +270,7 @@ async def start_telegram() -> tuple[
             )
 
             # ------------------------------------------------
-            # Audio stream
+            # Start audio stream
             # ------------------------------------------------
 
             audio_stream = AudioStream(
@@ -329,7 +329,7 @@ async def start_telegram() -> tuple[
             )
 
             # ------------------------------------------------
-            # Voice music controller
+            # Voice controller
             # ------------------------------------------------
 
             voice_music_controller = VoiceMusicController(
@@ -346,7 +346,7 @@ async def start_telegram() -> tuple[
             )
 
             # ------------------------------------------------
-            # Voice receiver
+            # VC receiver
             # ------------------------------------------------
 
             voice_receiver = VoiceChatReceiver(
@@ -360,10 +360,6 @@ async def start_telegram() -> tuple[
             logger.info(
                 "VC receiver initialized."
             )
-
-            # ------------------------------------------------
-            # SUCCESS
-            # ------------------------------------------------
 
             logger.info(
                 "Music + VC voice command system initialized."
@@ -446,12 +442,10 @@ def get_music_services():
 
 def get_voice_music_services():
 
-    if (
-        voice_receiver is None
-        or voice_music_controller is None
-    ):
+    if voice_receiver is None:
+
         raise RuntimeError(
-            "VC voice/music system is not initialized."
+            "VC voice receiver is not initialized."
         )
 
     return (
@@ -602,10 +596,7 @@ async def stop_telegram() -> None:
 
                 result = stop_method()
 
-                if hasattr(
-                    result,
-                    "__await__",
-                ):
+                if hasattr(result, "__await__"):
                     await result
 
         except Exception:
@@ -713,7 +704,7 @@ async def telegram_health() -> dict:
         )
 
     # --------------------------------------------------------
-    # Telethon
+    # User client
     # --------------------------------------------------------
 
     try:
