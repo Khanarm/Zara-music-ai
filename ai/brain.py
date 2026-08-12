@@ -24,7 +24,6 @@ from ai.prompts import (
 
 from ai.intent import (
     detect_intent,
-    IntentResult,
 )
 
 
@@ -92,18 +91,16 @@ async def generate_text(
 ) -> str:
     """
     Generate text using Gemini.
-
-    This function is also used by intent.py.
     """
+
+    prompt = str(prompt or "").strip()
 
     if not prompt:
         return ""
 
     client = get_gemini_client()
 
-    model_name = get_model_name(
-        model
-    )
+    model_name = get_model_name(model)
 
     try:
         response = await client.aio.models.generate_content(
@@ -127,7 +124,7 @@ async def generate_text(
             )
             return ""
 
-        return text.strip()
+        return str(text).strip()
 
     except Exception:
         logger.exception(
@@ -137,7 +134,7 @@ async def generate_text(
 
 
 # ============================================================
-# SIMPLE CHAT
+# SIMPLE ASK
 # ============================================================
 
 async def ask(
@@ -146,6 +143,35 @@ async def ask(
 ) -> str:
     """
     Simple Gemini question without memory.
+    """
+
+    return await generate_text(
+        prompt=prompt,
+        model=model,
+    )
+
+
+# ============================================================
+# ASK GEMINI
+# ============================================================
+#
+# Backward-compatible function.
+#
+# Some project files import:
+#
+#     from ai.brain import ask_gemini
+#
+# So this function MUST exist.
+# ============================================================
+
+async def ask_gemini(
+    prompt: str,
+    model: Optional[str] = None,
+) -> str:
+    """
+    Backward-compatible Gemini function.
+
+    Uses the same Gemini generator as ask().
     """
 
     return await generate_text(
@@ -207,24 +233,42 @@ async def chat(
     # Detect intent
     # --------------------------------------------------------
 
-    intent_result = await detect_intent(
-        text=message,
-        ai_client=(
-            _IntentAIAdapter()
-            if use_ai_intent
-            else None
-        ),
-        model=model,
-    )
+    try:
+        intent_result = await detect_intent(
+            text=message,
+            ai_client=(
+                _IntentAIAdapter()
+                if use_ai_intent
+                else None
+            ),
+            model=model,
+        )
+    except Exception:
+        logger.exception(
+            "Intent detection failed. "
+            "Continuing with default intent."
+        )
+
+        class DefaultIntent:
+            intent = "conversation"
+            confidence = 0.0
+
+        intent_result = DefaultIntent()
 
     # --------------------------------------------------------
     # Get conversation memory
     # --------------------------------------------------------
 
-    history = await get_ai_history(
-        user_id=user_id,
-        chat_id=chat_id,
-    )
+    try:
+        history = await get_ai_history(
+            user_id=user_id,
+            chat_id=chat_id,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to load AI history."
+        )
+        history = []
 
     # --------------------------------------------------------
     # Build full prompt
@@ -308,6 +352,13 @@ async def short_chat(
     Lightweight AI response without database memory.
     """
 
+    message = str(
+        message or ""
+    ).strip()
+
+    if not message:
+        return ""
+
     prompt = build_short_prompt(
         user_message=message,
     )
@@ -324,10 +375,9 @@ async def short_chat(
 
 class _IntentAIAdapter:
     """
-    Small adapter used by intent.py.
+    Adapter used by intent.py.
 
-    It exposes the same generate_text() method expected
-    by detect_intent_with_ai().
+    It exposes generate_text().
     """
 
     async def generate_text(
@@ -378,7 +428,7 @@ async def regenerate(
 
 
 # ============================================================
-# SUMMARIZE MEMORY
+# SUMMARIZE CONVERSATION
 # ============================================================
 
 async def summarize_conversation(
@@ -421,9 +471,7 @@ async def summarize_conversation(
                 f"{speaker}: {content}"
             )
 
-    conversation = "\n".join(
-        lines
-    )
+    conversation = "\n".join(lines)
 
     prompt = f"""
 Summarize the following conversation.
