@@ -165,10 +165,10 @@ async def initialize_scheduler():
         return result
 
     except ImportError:
-        logger.warning(
-            "Scheduler is not ready yet. "
-            "Skipping scheduler initialization."
+        logger.exception(
+           "Telegram initialization import failed."
         )
+    raise
 
         return None
 
