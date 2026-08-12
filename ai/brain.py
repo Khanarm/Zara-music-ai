@@ -56,6 +56,10 @@ def get_gemini_client() -> genai.Client:
         api_key=GEMINI_API_KEY
     )
 
+    logger.info(
+        "Gemini client initialized."
+    )
+
     return _client
 
 
@@ -68,15 +72,28 @@ def get_model_name(
 ) -> str:
     """
     Return configured Gemini model.
+
+    Priority:
+        1. Explicit model argument
+        2. GEMINI_MODEL environment variable
+        3. Current default model
     """
 
     if model:
-        return model
+        value = str(model).strip()
+
+        if value:
+            return value
 
     if GEMINI_MODEL:
-        return GEMINI_MODEL
+        value = str(
+            GEMINI_MODEL
+        ).strip()
 
-    return "gemini-2.5-flash"
+        if value:
+            return value
+
+    return "gemini-3.6-flash"
 
 
 # ============================================================
@@ -91,23 +108,38 @@ async def generate_text(
 ) -> str:
     """
     Generate text using Gemini.
+
+    The temperature argument is kept for backward
+    compatibility with the rest of the project.
+
+    Current Gemini model configuration is controlled
+    through GEMINI_MODEL.
     """
 
-    prompt = str(prompt or "").strip()
+    prompt = str(
+        prompt or ""
+    ).strip()
 
     if not prompt:
         return ""
 
     client = get_gemini_client()
 
-    model_name = get_model_name(model)
+    model_name = get_model_name(
+        model
+    )
+
+    logger.debug(
+        "Generating Gemini response using model=%s",
+        model_name,
+    )
 
     try:
+
         response = await client.aio.models.generate_content(
             model=model_name,
             contents=prompt,
             config=types.GenerateContentConfig(
-                temperature=temperature,
                 max_output_tokens=max_output_tokens,
             ),
         )
@@ -119,17 +151,25 @@ async def generate_text(
         )
 
         if not text:
+
             logger.warning(
                 "Gemini returned an empty response."
             )
+
             return ""
 
-        return str(text).strip()
+        return str(
+            text
+        ).strip()
 
     except Exception:
+
         logger.exception(
-            "Gemini text generation failed."
+            "Gemini text generation failed. "
+            "model=%s",
+            model_name,
         )
+
         raise
 
 
@@ -154,15 +194,6 @@ async def ask(
 # ============================================================
 # ASK GEMINI
 # ============================================================
-#
-# Backward-compatible function.
-#
-# Some project files import:
-#
-#     from ai.brain import ask_gemini
-#
-# So this function MUST exist.
-# ============================================================
 
 async def ask_gemini(
     prompt: str,
@@ -170,8 +201,6 @@ async def ask_gemini(
 ) -> str:
     """
     Backward-compatible Gemini function.
-
-    Uses the same Gemini generator as ask().
     """
 
     return await generate_text(
@@ -204,22 +233,6 @@ async def chat(
 ) -> str:
     """
     Main Zara conversation function.
-
-    Flow:
-
-        User message
-              ↓
-        Intent detection
-              ↓
-        Memory load
-              ↓
-        Prompt creation
-              ↓
-        Gemini
-              ↓
-        Save response
-              ↓
-        Return response
     """
 
     message = str(
@@ -234,6 +247,7 @@ async def chat(
     # --------------------------------------------------------
 
     try:
+
         intent_result = await detect_intent(
             text=message,
             ai_client=(
@@ -243,7 +257,9 @@ async def chat(
             ),
             model=model,
         )
+
     except Exception:
+
         logger.exception(
             "Intent detection failed. "
             "Continuing with default intent."
@@ -260,14 +276,18 @@ async def chat(
     # --------------------------------------------------------
 
     try:
+
         history = await get_ai_history(
             user_id=user_id,
             chat_id=chat_id,
         )
+
     except Exception:
+
         logger.exception(
             "Failed to load AI history."
         )
+
         history = []
 
     # --------------------------------------------------------
@@ -298,14 +318,18 @@ async def chat(
     # --------------------------------------------------------
 
     if save_memory:
+
         try:
+
             await save_user_message(
                 user_id=user_id,
                 content=message,
                 chat_id=chat_id,
                 username=username,
             )
+
         except Exception:
+
             logger.exception(
                 "Failed to save user message."
             )
@@ -326,13 +350,17 @@ async def chat(
     # --------------------------------------------------------
 
     if response and save_memory:
+
         try:
+
             await save_assistant_message(
                 user_id=user_id,
                 content=response,
                 chat_id=chat_id,
             )
+
         except Exception:
+
             logger.exception(
                 "Failed to save assistant message."
             )
@@ -376,8 +404,6 @@ async def short_chat(
 class _IntentAIAdapter:
     """
     Adapter used by intent.py.
-
-    It exposes generate_text().
     """
 
     async def generate_text(
@@ -385,6 +411,7 @@ class _IntentAIAdapter:
         prompt: str,
         model: Optional[str] = None,
     ) -> str:
+
         return await generate_text(
             prompt=prompt,
             model=model,
@@ -405,8 +432,6 @@ async def regenerate(
 ) -> str:
     """
     Generate a fresh response using existing memory.
-
-    The new user message is not saved again.
     """
 
     history = await get_ai_history(
@@ -451,6 +476,7 @@ async def summarize_conversation(
     lines = []
 
     for item in history:
+
         role = item.get(
             "role",
             "user",
@@ -467,11 +493,14 @@ async def summarize_conversation(
             speaker = "User"
 
         if content:
+
             lines.append(
                 f"{speaker}: {content}"
             )
 
-    conversation = "\n".join(lines)
+    conversation = "\n".join(
+        lines
+    )
 
     prompt = f"""
 Summarize the following conversation.
@@ -511,16 +540,35 @@ async def test_gemini() -> bool:
     """
 
     try:
+
         response = await generate_text(
             prompt="Reply with exactly: OK",
             temperature=0.0,
             max_output_tokens=10,
         )
 
-        return bool(response)
+        return bool(
+            response
+        )
 
     except Exception:
+
         logger.exception(
             "Gemini health check failed."
         )
+
         return False
+
+
+__all__ = [
+    "get_gemini_client",
+    "get_model_name",
+    "generate_text",
+    "ask",
+    "ask_gemini",
+    "chat",
+    "short_chat",
+    "regenerate",
+    "summarize_conversation",
+    "test_gemini",
+]
