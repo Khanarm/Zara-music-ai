@@ -31,6 +31,18 @@ STT_TIMEOUT = int(
     )
 )
 
+# ------------------------------------------------------------
+# Gemini model
+#
+# Use GEMINI_MODEL so STT and normal AI use the same
+# configured model.
+# ------------------------------------------------------------
+
+GEMINI_MODEL = os.getenv(
+    "GEMINI_MODEL",
+    "gemini-3.6-flash",
+)
+
 
 # ============================================================
 # RESULT
@@ -47,6 +59,7 @@ class STTResult:
         language: Optional[str] = None,
         confidence: Optional[float] = None,
     ):
+
         self.text = (
             text or ""
         ).strip()
@@ -55,11 +68,13 @@ class STTResult:
         self.confidence = confidence
 
     def __bool__(self) -> bool:
+
         return bool(
             self.text
         )
 
     def to_dict(self) -> dict:
+
         return {
             "text": self.text,
             "language": self.language,
@@ -88,6 +103,7 @@ def validate_audio_file(
         )
 
         if not path.exists():
+
             logger.warning(
                 "STT audio file does not exist: %s",
                 path,
@@ -99,6 +115,7 @@ def validate_audio_file(
             return False
 
         if path.stat().st_size <= 0:
+
             logger.warning(
                 "STT audio file is empty: %s",
                 path,
@@ -127,8 +144,6 @@ async def transcribe_with_gemini(
 ) -> STTResult:
     """
     Transcribe audio using Google's Gemini API.
-
-    The google-genai package is used asynchronously.
     """
 
     try:
@@ -166,14 +181,28 @@ async def transcribe_with_gemini(
         or STT_LANGUAGE
     )
 
+    model_name = (
+        os.getenv(
+            "GEMINI_MODEL"
+        )
+        or GEMINI_MODEL
+        or "gemini-3.6-flash"
+    ).strip()
+
     try:
 
         client = genai.Client(
             api_key=api_key
         )
 
+        logger.debug(
+            "Starting Gemini STT: model=%s file=%s",
+            model_name,
+            file_path,
+        )
+
         # ----------------------------------------------------
-        # Upload audio file.
+        # Upload audio
         # ----------------------------------------------------
 
         uploaded_file = await asyncio.wait_for(
@@ -187,7 +216,7 @@ async def transcribe_with_gemini(
         )
 
         # ----------------------------------------------------
-        # Ask Gemini to transcribe only.
+        # Transcription prompt
         # ----------------------------------------------------
 
         prompt = f"""
@@ -201,19 +230,29 @@ Rules:
 - Preserve the original meaning.
 - Detect the spoken language automatically.
 - The expected language may be: {language}.
-- If the speaker mixes Hindi and English, preserve the natural Hinglish.
+- If the speaker mixes Hindi and English, preserve natural Hinglish.
+- Do not translate the speech.
+- Do not add punctuation or words that were not spoken unless
+  required for readability.
 """
+
+        # ----------------------------------------------------
+        # Gemini transcription
+        #
+        # Do not send temperature because current Gemini 3.x
+        # models have changed generation configuration support.
+        # ----------------------------------------------------
 
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 client.models.generate_content,
-                model="gemini-2.5-flash",
+                model=model_name,
                 contents=[
                     uploaded_file,
                     prompt,
                 ],
                 config=types.GenerateContentConfig(
-                    temperature=0,
+                    max_output_tokens=2048,
                 ),
             ),
             timeout=STT_TIMEOUT,
@@ -236,6 +275,10 @@ Rules:
 
             return STTResult()
 
+        logger.debug(
+            "Gemini STT completed successfully."
+        )
+
         return STTResult(
             text=text,
             language=language,
@@ -244,7 +287,8 @@ Rules:
     except asyncio.TimeoutError:
 
         logger.error(
-            "Gemini STT request timed out."
+            "Gemini STT request timed out after %s seconds.",
+            STT_TIMEOUT,
         )
 
         return STTResult()
@@ -252,7 +296,8 @@ Rules:
     except Exception:
 
         logger.exception(
-            "Gemini STT failed."
+            "Gemini STT failed. model=%s",
+            model_name,
         )
 
         return STTResult()
@@ -325,6 +370,7 @@ def is_stt_configured() -> bool:
     ).lower().strip()
 
     if provider == "gemini":
+
         return bool(
             os.getenv(
                 "GEMINI_API_KEY"
@@ -348,6 +394,7 @@ class SpeechToText:
         provider: Optional[str] = None,
         language: Optional[str] = None,
     ):
+
         self.provider = (
             provider
             or STT_PROVIDER
@@ -363,7 +410,12 @@ class SpeechToText:
         file_path: Path,
     ) -> STTResult:
 
-        if self.provider.lower() == "gemini":
+        provider = (
+            self.provider
+            or "gemini"
+        ).lower().strip()
+
+        if provider == "gemini":
 
             return await transcribe_with_gemini(
                 file_path=file_path,
@@ -372,7 +424,7 @@ class SpeechToText:
 
         logger.error(
             "Unsupported STT provider: %s",
-            self.provider,
+            provider,
         )
 
         return STTResult()
@@ -383,3 +435,19 @@ class SpeechToText:
 # ============================================================
 
 stt = SpeechToText()
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+
+__all__ = [
+    "STTResult",
+    "SpeechToText",
+    "stt",
+    "transcribe",
+    "transcribe_with_gemini",
+    "speech_to_text",
+    "is_stt_configured",
+    "validate_audio_file",
+            ]
