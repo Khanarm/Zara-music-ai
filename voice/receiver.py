@@ -1,380 +1,468 @@
-# voice/receiver.py
+# voice/vc_receiver.py
 
+import inspect
 import logging
-import os
-import tempfile
-from pathlib import Path
-from typing import Optional
-
-from aiogram import Bot
-from aiogram.types import Message
-
+from typing import Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 
-# ============================================================
-# CONFIG
-# ============================================================
+TranscriptHandler = Callable[
+    [int, str],
+    Awaitable[None],
+]
 
-DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 
-
-# ============================================================
-# TEMP DIRECTORY
-# ============================================================
-
-def get_temp_directory() -> Path:
+class VoiceChatReceiver:
     """
-    Create and return Zara's temporary voice directory.
-    """
+    Compatible VC manager for the current PyTgCalls API.
 
-    directory = Path(
-        tempfile.gettempdir()
-    ) / "zara_ai"
-
-    directory.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    return directory
-
-
-# ============================================================
-# FILE NAME
-# ============================================================
-
-def build_file_path(
-    file_id: str,
-    extension: str = ".ogg",
-) -> Path:
-    """
-    Build a safe temporary file path.
+    Responsibilities:
+        - Join active Telegram voice chats.
+        - Leave voice chats.
+        - Track joined chats.
+        - Register optional speech-frame listener if the
+          installed PyTgCalls version provides it.
+        - Never break the complete music system when speech
+          capture is unavailable.
     """
 
-    safe_file_id = "".join(
-        char
-        for char in str(file_id)
-        if char.isalnum()
-        or char in (
-            "_",
-            "-",
-        )
-    )
+    def __init__(
+        self,
+        calls,
+        user_client=None,
+        on_transcript: Optional[TranscriptHandler] = None,
+    ) -> None:
 
-    if not safe_file_id:
-        safe_file_id = "voice"
+        self.calls = calls
+        self.user_client = user_client
+        self.on_transcript = on_transcript
 
-    if not extension.startswith("."):
-        extension = "." + extension
+        self.joined_chats: set[int] = set()
 
-    return (
-        get_temp_directory()
-        / f"{safe_file_id}{extension}"
-    )
+        self._registered = False
+        self._speech_capture_available = False
 
+    # ========================================================
+    # REGISTER
+    # ========================================================
 
-# ============================================================
-# DOWNLOAD TELEGRAM FILE
-# ============================================================
+    async def register(self) -> bool:
+        """
+        Register optional incoming speech capture.
 
-async def download_telegram_file(
-    bot: Bot,
-    file_id: str,
-    destination: Path,
-    max_size: int = DEFAULT_MAX_FILE_SIZE,
-) -> Optional[Path]:
-    """
-    Download a Telegram file to a temporary path.
-    """
+        Newer PyTgCalls versions may not expose the old
+        filters.stream_frame() API. In that case we keep
+        VC join/music functionality enabled and simply
+        disable speech capture.
+        """
 
-    try:
+        if self._registered:
+            return self._speech_capture_available
 
-        telegram_file = await bot.get_file(
-            file_id
-        )
+        self._registered = True
 
-        file_size = getattr(
-            telegram_file,
-            "file_size",
+        try:
+
+            from pytgcalls import filters as pytg_filters
+
+        except Exception:
+
+            logger.warning(
+                "PyTgCalls filters API unavailable. "
+                "VC speech capture disabled."
+            )
+
+            return False
+
+        stream_frame = getattr(
+            pytg_filters,
+            "stream_frame",
             None,
         )
 
-        if (
-            file_size is not None
-            and file_size > max_size
-        ):
+        if stream_frame is None:
+
             logger.warning(
-                "Telegram file is too large: %s bytes",
-                file_size,
+                "PyTgCalls does not provide "
+                "filters.stream_frame(). "
+                "VC speech frame capture is unavailable."
             )
 
-            return None
+            return False
 
-        destination.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        # ----------------------------------------------------
+        # Try registering the old stream-frame API.
+        # ----------------------------------------------------
 
-        await bot.download_file(
-            telegram_file.file_path,
-            destination=str(
-                destination
-            ),
-        )
+        try:
 
-        if not destination.exists():
-            logger.error(
-                "Telegram file download failed: %s",
-                destination,
+            decorator = self.calls.on_update(
+                stream_frame()
             )
 
-            return None
+            if decorator is None:
 
-        return destination
+                logger.warning(
+                    "PyTgCalls stream-frame registration "
+                    "returned no decorator."
+                )
 
-    except Exception:
+                return False
 
-        logger.exception(
-            "Failed to download Telegram file."
-        )
+            async def handler(
+                client,
+                update,
+            ):
 
-        return None
+                await self._handle_stream_frame(
+                    update
+                )
 
+            decorator(handler)
 
-# ============================================================
-# RECEIVE VOICE
-# ============================================================
+            self._speech_capture_available = True
 
-async def receive_voice(
-    message: Message,
-) -> Optional[Path]:
-    """
-    Download a Telegram voice message.
-
-    Returns:
-        Local temporary file path or None.
-    """
-
-    if not message.voice:
-        return None
-
-    if not message.bot:
-        logger.error(
-            "Message does not have an attached bot."
-        )
-
-        return None
-
-    file_id = message.voice.file_id
-
-    destination = build_file_path(
-        file_id,
-        ".ogg",
-    )
-
-    return await download_telegram_file(
-        bot=message.bot,
-        file_id=file_id,
-        destination=destination,
-    )
-
-
-# ============================================================
-# RECEIVE AUDIO
-# ============================================================
-
-async def receive_audio(
-    message: Message,
-) -> Optional[Path]:
-    """
-    Download a Telegram audio message.
-    """
-
-    if not message.audio:
-        return None
-
-    if not message.bot:
-        logger.error(
-            "Message does not have an attached bot."
-        )
-
-        return None
-
-    file_id = message.audio.file_id
-
-    extension = ".mp3"
-
-    if message.audio.file_name:
-
-        suffix = Path(
-            message.audio.file_name
-        ).suffix.lower()
-
-        if suffix:
-            extension = suffix
-
-    destination = build_file_path(
-        file_id,
-        extension,
-    )
-
-    return await download_telegram_file(
-        bot=message.bot,
-        file_id=file_id,
-        destination=destination,
-    )
-
-
-# ============================================================
-# RECEIVE DOCUMENT
-# ============================================================
-
-async def receive_document(
-    message: Message,
-) -> Optional[Path]:
-    """
-    Download an audio/voice document if required.
-    """
-
-    if not message.document:
-        return None
-
-    if not message.bot:
-        return None
-
-    file_id = message.document.file_id
-
-    extension = ".bin"
-
-    if message.document.file_name:
-
-        suffix = Path(
-            message.document.file_name
-        ).suffix.lower()
-
-        if suffix:
-            extension = suffix
-
-    destination = build_file_path(
-        file_id,
-        extension,
-    )
-
-    return await download_telegram_file(
-        bot=message.bot,
-        file_id=file_id,
-        destination=destination,
-    )
-
-
-# ============================================================
-# RECEIVE MEDIA
-# ============================================================
-
-async def receive_media(
-    message: Message,
-) -> Optional[Path]:
-    """
-    Automatically detect voice/audio/document media
-    and download it.
-    """
-
-    if message.voice:
-        return await receive_voice(
-            message
-        )
-
-    if message.audio:
-        return await receive_audio(
-            message
-        )
-
-    if message.document:
-        return await receive_document(
-            message
-        )
-
-    return None
-
-
-# ============================================================
-# DELETE TEMP FILE
-# ============================================================
-
-def delete_temp_file(
-    path: Optional[Path],
-) -> bool:
-    """
-    Delete a temporary voice/audio file.
-    """
-
-    if not path:
-        return False
-
-    try:
-
-        if path.exists():
-            path.unlink()
-
-            logger.debug(
-                "Temporary voice file deleted: %s",
-                path,
+            logger.info(
+                "VC speech frame capture registered."
             )
 
             return True
 
-    except Exception:
+        except Exception:
 
-        logger.exception(
-            "Failed to delete temporary file: %s",
-            path,
-        )
+            logger.warning(
+                "Installed PyTgCalls stream-frame API "
+                "is not compatible with VC receiver. "
+                "Speech capture disabled.",
+                exc_info=True,
+            )
 
-    return False
+            self._speech_capture_available = False
 
+            return False
 
-# ============================================================
-# CLEAN TEMP DIRECTORY
-# ============================================================
+    # ========================================================
+    # HANDLE STREAM FRAME
+    # ========================================================
 
-def cleanup_temp_files() -> int:
-    """
-    Remove temporary Zara voice files.
-    """
+    async def _handle_stream_frame(
+        self,
+        update,
+    ) -> None:
 
-    directory = get_temp_directory()
+        """
+        Optional frame callback.
 
-    removed = 0
+        This is intentionally defensive because PyTgCalls
+        versions expose different frame objects.
+        """
 
-    try:
+        if not self.on_transcript:
+            return
 
-        for file_path in directory.iterdir():
+        try:
 
-            if not file_path.is_file():
-                continue
+            chat_id = getattr(
+                update,
+                "chat_id",
+                None,
+            )
 
-            try:
-                file_path.unlink()
-                removed += 1
+            if chat_id is None:
+                return
 
-            except Exception:
-                logger.exception(
-                    "Failed to remove temp file: %s",
-                    file_path,
+            # The current project does not include a guaranteed
+            # STT decoder for arbitrary PyTgCalls frames here.
+            #
+            # Keep this method ready for a future compatible
+            # frame decoder without breaking VC joining.
+
+            return
+
+        except Exception:
+
+            logger.exception(
+                "Failed to process VC stream frame."
+            )
+
+    # ========================================================
+    # CHECK ACTIVE VC
+    # ========================================================
+
+    async def has_active_voice_chat(
+        self,
+        chat_id: int,
+    ) -> bool:
+
+        """
+        Check whether Telegram currently has an active
+        group call for this chat.
+        """
+
+        try:
+
+            # Current PyTgCalls exposes get_input_call()
+            # through its MTProto client internally, but the
+            # public high-level API may vary between versions.
+
+            app = getattr(
+                self.calls,
+                "mtproto_client",
+                None,
+            )
+
+            if app is not None:
+
+                getter = getattr(
+                    app,
+                    "get_input_call",
+                    None,
                 )
 
-    except Exception:
+                if getter is not None:
 
-        logger.exception(
-            "Failed to clean voice temp directory."
-        )
+                    result = getter(chat_id)
 
-    if removed:
+                    if inspect.isawaitable(result):
+                        result = await result
+
+                    return result is not None
+
+        except Exception:
+
+            logger.debug(
+                "Unable to directly inspect active VC.",
+                exc_info=True,
+            )
+
+        # ----------------------------------------------------
+        # Fallback:
+        #
+        # Let PyTgCalls attempt the join. If there is no
+        # active VC, its NoActiveGroupCall exception will
+        # be handled by join().
+        # ----------------------------------------------------
+
+        return True
+
+    # ========================================================
+    # JOIN
+    # ========================================================
+
+    async def join(
+        self,
+        chat_id: int,
+    ) -> bool:
+
+        chat_id = int(chat_id)
+
+        # Already connected.
+        if chat_id in self.joined_chats:
+
+            logger.info(
+                "VC receiver already joined for %s",
+                chat_id,
+            )
+
+            return True
+
+        try:
+
+            # ------------------------------------------------
+            # IMPORTANT:
+            #
+            # Current PyTgCalls supports:
+            #
+            # await calls.play(chat_id, None)
+            #
+            # This creates/connects the group-call transport
+            # without requiring an audio file.
+            # ------------------------------------------------
+
+            play = getattr(
+                self.calls,
+                "play",
+                None,
+            )
+
+            if play is None:
+
+                raise RuntimeError(
+                    "Installed PyTgCalls does not expose play()."
+                )
+
+            result = play(
+                chat_id,
+                None,
+            )
+
+            if inspect.isawaitable(result):
+                await result
+
+            self.joined_chats.add(
+                chat_id
+            )
+
+            logger.info(
+                "VC receiver joined successfully for %s",
+                chat_id,
+            )
+
+            if not self._registered:
+                await self.register()
+
+            if self._speech_capture_available:
+
+                logger.info(
+                    "VC speech capture enabled for %s",
+                    chat_id,
+                )
+
+            else:
+
+                logger.warning(
+                    "VC receiver joined logically for %s, "
+                    "but incoming speech capture is unavailable "
+                    "with the installed PyTgCalls API.",
+                    chat_id,
+                )
+
+            return True
+
+        except Exception as exc:
+
+            logger.warning(
+                "VC join failed for %s: %s",
+                chat_id,
+                exc,
+            )
+
+            return False
+
+    # ========================================================
+    # LEAVE
+    # ========================================================
+
+    async def leave(
+        self,
+        chat_id: int,
+    ) -> bool:
+
+        chat_id = int(chat_id)
+
+        try:
+
+            leave_call = getattr(
+                self.calls,
+                "leave_call",
+                None,
+            )
+
+            if leave_call is None:
+
+                raise RuntimeError(
+                    "Installed PyTgCalls does not expose leave_call()."
+                )
+
+            result = leave_call(
+                chat_id
+            )
+
+            if inspect.isawaitable(result):
+                await result
+
+            self.joined_chats.discard(
+                chat_id
+            )
+
+            logger.info(
+                "VC speech receiver stopped for chat %s",
+                chat_id,
+            )
+
+            return True
+
+        except Exception as exc:
+
+            # If PyTgCalls says we are not in a call,
+            # still clean our local state.
+            self.joined_chats.discard(
+                chat_id
+            )
+
+            logger.warning(
+                "VC leave failed for %s: %s",
+                chat_id,
+                exc,
+            )
+
+            return False
+
+    # ========================================================
+    # IS JOINED
+    # ========================================================
+
+    def is_joined(
+        self,
+        chat_id: int,
+    ) -> bool:
+
+        return int(chat_id) in self.joined_chats
+
+    # ========================================================
+    # STOP
+    # ========================================================
+
+    async def stop(
+        self,
+        chat_id: Optional[int] = None,
+    ) -> None:
+
+        if chat_id is not None:
+
+            await self.leave(
+                int(chat_id)
+            )
+
+            return
+
+        for current_chat_id in list(
+            self.joined_chats
+        ):
+
+            await self.leave(
+                current_chat_id
+            )
+
+    # ========================================================
+    # CLEANUP
+    # ========================================================
+
+    async def cleanup(self) -> None:
+
+        for chat_id in list(
+            self.joined_chats
+        ):
+
+            try:
+
+                await self.leave(
+                    chat_id
+                )
+
+            except Exception:
+
+                logger.exception(
+                    "Failed to cleanup VC %s",
+                    chat_id,
+                )
+
+        self.joined_chats.clear()
+
+        self._registered = False
+        self._speech_capture_available = False
+
         logger.info(
-            "Removed %s temporary voice files.",
-            removed,
-        )
-
-    return removed
+            "VC receiver cleanup completed."
+            )
