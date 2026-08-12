@@ -1,5 +1,3 @@
-# database/mongodb.py
-
 import logging
 from typing import Optional
 
@@ -11,7 +9,15 @@ from motor.motor_asyncio import (
 from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import PyMongoError
 
-from config import config
+from config import (
+    MONGO_URI,
+    MONGO_DB_NAME,
+    USERS_COLLECTION,
+    GROUPS_COLLECTION,
+    SUBSCRIPTIONS_COLLECTION,
+    PAYMENTS_COLLECTION,
+    SETTINGS_COLLECTION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +46,10 @@ class Database:
 # Global database instance
 db_instance = Database()
 
+# Compatibility aliases
+client = None
+db = None
+
 
 # ============================================================
 # CONNECT
@@ -52,6 +62,8 @@ async def connect_db() -> AsyncIOMotorDatabase:
     Safe to call multiple times.
     """
 
+    global client, db
+
     if (
         db_instance.client is not None
         and db_instance.db is not None
@@ -59,9 +71,14 @@ async def connect_db() -> AsyncIOMotorDatabase:
     ):
         return db_instance.db
 
-    if not config.MONGO_URI:
+    if not MONGO_URI:
         raise RuntimeError(
-            "MONGO_URI is not configured."
+            "MONGODB_URI is not configured."
+        )
+
+    if not MONGO_DB_NAME:
+        raise RuntimeError(
+            "MONGODB_DATABASE is not configured."
         )
 
     try:
@@ -70,7 +87,7 @@ async def connect_db() -> AsyncIOMotorDatabase:
         )
 
         db_instance.client = AsyncIOMotorClient(
-            config.MONGO_URI,
+            MONGO_URI,
             serverSelectionTimeoutMS=10000,
             connectTimeoutMS=10000,
             socketTimeoutMS=20000,
@@ -78,10 +95,14 @@ async def connect_db() -> AsyncIOMotorDatabase:
         )
 
         db_instance.db = db_instance.client[
-            config.DB_NAME
+            MONGO_DB_NAME
         ]
 
-        # Verify connection.
+        # Compatibility aliases
+        client = db_instance.client
+        db = db_instance.db
+
+        # Verify connection
         await db_instance.client.admin.command(
             "ping"
         )
@@ -92,7 +113,7 @@ async def connect_db() -> AsyncIOMotorDatabase:
 
         logger.info(
             "MongoDB connected successfully: %s",
-            config.DB_NAME,
+            MONGO_DB_NAME,
         )
 
         return db_instance.db
@@ -109,7 +130,30 @@ async def connect_db() -> AsyncIOMotorDatabase:
         db_instance.db = None
         db_instance._connected = False
 
+        client = None
+        db = None
+
         raise
+
+
+# ============================================================
+# ALIASES FOR STARTUP COMPATIBILITY
+# ============================================================
+
+async def init_db() -> AsyncIOMotorDatabase:
+    """
+    Compatibility alias for connect_db().
+    """
+
+    return await connect_db()
+
+
+async def init_database() -> AsyncIOMotorDatabase:
+    """
+    Compatibility alias used by main.py.
+    """
+
+    return await connect_db()
 
 
 # ============================================================
@@ -121,6 +165,8 @@ async def close_db() -> None:
     Close MongoDB connection gracefully.
     """
 
+    global client, db
+
     if db_instance.client is not None:
         logger.info(
             "Closing MongoDB connection..."
@@ -131,6 +177,9 @@ async def close_db() -> None:
     db_instance.client = None
     db_instance.db = None
     db_instance._connected = False
+
+    client = None
+    db = None
 
     logger.info(
         "MongoDB connection closed."
@@ -163,23 +212,23 @@ def get_db() -> AsyncIOMotorDatabase:
 # ============================================================
 
 def get_users_collection() -> AsyncIOMotorCollection:
-    return get_db()["users"]
+    return get_db()[USERS_COLLECTION]
 
 
 def get_groups_collection() -> AsyncIOMotorCollection:
-    return get_db()["groups"]
+    return get_db()[GROUPS_COLLECTION]
 
 
 def get_subscriptions_collection() -> AsyncIOMotorCollection:
-    return get_db()["subscriptions"]
+    return get_db()[SUBSCRIPTIONS_COLLECTION]
 
 
 def get_payments_collection() -> AsyncIOMotorCollection:
-    return get_db()["payments"]
+    return get_db()[PAYMENTS_COLLECTION]
 
 
 def get_settings_collection() -> AsyncIOMotorCollection:
-    return get_db()["settings"]
+    return get_db()[SETTINGS_COLLECTION]
 
 
 # ============================================================
@@ -189,9 +238,6 @@ def get_settings_collection() -> AsyncIOMotorCollection:
 def users() -> AsyncIOMotorCollection:
     """
     Users collection.
-
-    Usage:
-        await users().find_one(...)
     """
 
     return get_users_collection()
@@ -243,13 +289,25 @@ async def create_indexes() -> None:
 
     database = get_db()
 
-    users_collection = database["users"]
-    groups_collection = database["groups"]
-    subscriptions_collection = database[
-        "subscriptions"
+    users_collection = database[
+        USERS_COLLECTION
     ]
-    payments_collection = database["payments"]
-    settings_collection = database["settings"]
+
+    groups_collection = database[
+        GROUPS_COLLECTION
+    ]
+
+    subscriptions_collection = database[
+        SUBSCRIPTIONS_COLLECTION
+    ]
+
+    payments_collection = database[
+        PAYMENTS_COLLECTION
+    ]
+
+    settings_collection = database[
+        SETTINGS_COLLECTION
+    ]
 
     try:
 
@@ -317,10 +375,6 @@ async def create_indexes() -> None:
         # SUBSCRIPTIONS
         # ====================================================
 
-        # One subscription relationship per:
-        #
-        # user_id + group_id
-        #
         await subscriptions_collection.create_index(
             [
                 (
@@ -393,10 +447,6 @@ async def create_indexes() -> None:
             name="unique_payment_id",
         )
 
-        # Telegram charge IDs must also be unique.
-        #
-        # sparse=True is used because older/internal records
-        # may not have this field.
         await payments_collection.create_index(
             [
                 (
@@ -515,4 +565,16 @@ def get_database_name() -> str:
     Return configured database name.
     """
 
-    return config.DB_NAME
+    return MONGO_DB_NAME
+
+
+# ============================================================
+# DATABASE OBJECT
+# ============================================================
+
+def get_database() -> AsyncIOMotorDatabase:
+    """
+    Compatibility alias for get_db().
+    """
+
+    return get_db()
