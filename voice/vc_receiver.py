@@ -1,159 +1,250 @@
 # voice/vc_receiver.py
 
-import asyncio
-import io
+import inspect
 import logging
-import struct
-import time
-import wave
-from dataclasses import dataclass, field
-from pathlib import Path
-from tempfile import gettempdir
 from typing import Awaitable, Callable, Optional
-
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class SpeechBuffer:
-    chunks: list[bytes] = field(default_factory=list)
-    started_at: float = 0.0
-    last_voice_at: float = 0.0
-    bytes_count: int = 0
+TranscriptHandler = Callable[
+    [int, str],
+    Awaitable[None],
+]
 
 
 class VoiceChatReceiver:
     """
-    Zara Telegram Voice Chat receiver.
+    Compatible VC manager for the current PyTgCalls API.
 
-    Important:
-    The installed PyTgCalls version does not expose the old
-    stream_frame / Device / Direction / RecordStream API.
-
-    Therefore this class:
-      - never imports deprecated PyTgCalls classes
-      - never crashes Telegram startup because VC receiver is unavailable
-      - keeps the receiver API compatible with telegram.client
-      - supports frame processing if a compatible frame callback
-        is available in the installed PyTgCalls version
+    Responsibilities:
+        - Join active Telegram voice chats.
+        - Leave voice chats.
+        - Track joined chats.
+        - Register optional speech-frame listener if the
+          installed PyTgCalls version provides it.
+        - Never break the complete music system when speech
+          capture is unavailable.
     """
-
-    SAMPLE_RATE = 48000
-    CHANNELS = 2
-    SAMPLE_WIDTH = 2
-
-    SILENCE_SECONDS = 0.75
-    MIN_SPEECH_SECONDS = 0.55
-    MAX_SPEECH_SECONDS = 8.0
-    RMS_THRESHOLD = 450.0
 
     def __init__(
         self,
         calls,
-        user_client,
-        *,
-        on_transcript: Callable[
-            [int, int, str],
-            Awaitable[None],
-        ],
-    ):
+        user_client=None,
+        on_transcript: Optional[TranscriptHandler] = None,
+    ) -> None:
+
         self.calls = calls
         self.user_client = user_client
         self.on_transcript = on_transcript
 
-        self.buffers: dict[
-            tuple[int, int],
-            SpeechBuffer,
-        ] = {}
-
-        self.active_chats: set[int] = set()
+        self.joined_chats: set[int] = set()
 
         self._registered = False
-        self._frame_capture_available = False
-
-        self._tasks: set[asyncio.Task] = set()
+        self._speech_capture_available = False
 
     # ========================================================
     # REGISTER
     # ========================================================
 
-    async def register(self) -> None:
+    async def register(self) -> bool:
         """
-        Register a compatible frame callback if the installed
-        PyTgCalls version supports one.
+        Register optional incoming speech capture.
 
-        The current PyTgCalls installation shown in the logs does
-        NOT expose filters.stream_frame(), so registration is
-        optional and must never break the bot.
+        Newer PyTgCalls versions may not expose the old
+        filters.stream_frame() API. In that case we keep
+        VC join/music functionality enabled and simply
+        disable speech capture.
         """
 
         if self._registered:
-            return
+            return self._speech_capture_available
 
         self._registered = True
 
         try:
-            from pytgcalls import filters
 
-            stream_frame = getattr(
-                filters,
-                "stream_frame",
-                None,
-            )
-
-            on_update = getattr(
-                self.calls,
-                "on_update",
-                None,
-            )
-
-            if stream_frame is None:
-                logger.warning(
-                    "PyTgCalls does not provide "
-                    "filters.stream_frame(). "
-                    "VC speech frame capture is unavailable."
-                )
-                return
-
-            if on_update is None:
-                logger.warning(
-                    "PyTgCalls does not provide on_update(). "
-                    "VC speech frame capture is unavailable."
-                )
-                return
-
-            # Some versions expose stream_frame as a factory.
-            # Some versions require arguments.
-            try:
-                stream_filter = stream_frame()
-            except TypeError:
-                logger.warning(
-                    "Installed PyTgCalls stream_frame() API "
-                    "requires arguments. VC speech capture disabled."
-                )
-                return
-
-            @self.calls.on_update(stream_filter)
-            async def _frame_handler(
-                _,
-                update,
-            ):
-                await self._handle_frames(update)
-
-            self._frame_capture_available = True
-
-            logger.info(
-                "VC speech frame receiver registered successfully."
-            )
+            from pytgcalls import filters as pytg_filters
 
         except Exception:
-            self._frame_capture_available = False
+
+            logger.warning(
+                "PyTgCalls filters API unavailable. "
+                "VC speech capture disabled."
+            )
+
+            return False
+
+        stream_frame = getattr(
+            pytg_filters,
+            "stream_frame",
+            None,
+        )
+
+        if stream_frame is None:
+
+            logger.warning(
+                "PyTgCalls does not provide "
+                "filters.stream_frame(). "
+                "VC speech frame capture is unavailable."
+            )
+
+            return False
+
+        # ----------------------------------------------------
+        # Try registering the old stream-frame API.
+        # ----------------------------------------------------
+
+        try:
+
+            decorator = self.calls.on_update(
+                stream_frame()
+            )
+
+            if decorator is None:
+
+                logger.warning(
+                    "PyTgCalls stream-frame registration "
+                    "returned no decorator."
+                )
+
+                return False
+
+            async def handler(
+                client,
+                update,
+            ):
+
+                await self._handle_stream_frame(
+                    update
+                )
+
+            decorator(handler)
+
+            self._speech_capture_available = True
+
+            logger.info(
+                "VC speech frame capture registered."
+            )
+
+            return True
+
+        except Exception:
+
+            logger.warning(
+                "Installed PyTgCalls stream-frame API "
+                "is not compatible with VC receiver. "
+                "Speech capture disabled.",
+                exc_info=True,
+            )
+
+            self._speech_capture_available = False
+
+            return False
+
+    # ========================================================
+    # HANDLE STREAM FRAME
+    # ========================================================
+
+    async def _handle_stream_frame(
+        self,
+        update,
+    ) -> None:
+
+        """
+        Optional frame callback.
+
+        This is intentionally defensive because PyTgCalls
+        versions expose different frame objects.
+        """
+
+        if not self.on_transcript:
+            return
+
+        try:
+
+            chat_id = getattr(
+                update,
+                "chat_id",
+                None,
+            )
+
+            if chat_id is None:
+                return
+
+            # The current project does not include a guaranteed
+            # STT decoder for arbitrary PyTgCalls frames here.
+            #
+            # Keep this method ready for a future compatible
+            # frame decoder without breaking VC joining.
+
+            return
+
+        except Exception:
 
             logger.exception(
-                "VC speech frame receiver registration failed. "
-                "Continuing without speech capture."
+                "Failed to process VC stream frame."
             )
+
+    # ========================================================
+    # CHECK ACTIVE VC
+    # ========================================================
+
+    async def has_active_voice_chat(
+        self,
+        chat_id: int,
+    ) -> bool:
+
+        """
+        Check whether Telegram currently has an active
+        group call for this chat.
+        """
+
+        try:
+
+            # Current PyTgCalls exposes get_input_call()
+            # through its MTProto client internally, but the
+            # public high-level API may vary between versions.
+
+            app = getattr(
+                self.calls,
+                "mtproto_client",
+                None,
+            )
+
+            if app is not None:
+
+                getter = getattr(
+                    app,
+                    "get_input_call",
+                    None,
+                )
+
+                if getter is not None:
+
+                    result = getter(chat_id)
+
+                    if inspect.isawaitable(result):
+                        result = await result
+
+                    return result is not None
+
+        except Exception:
+
+            logger.debug(
+                "Unable to directly inspect active VC.",
+                exc_info=True,
+            )
+
+        # ----------------------------------------------------
+        # Fallback:
+        #
+        # Let PyTgCalls attempt the join. If there is no
+        # active VC, its NoActiveGroupCall exception will
+        # be handled by join().
+        # ----------------------------------------------------
+
+        return True
 
     # ========================================================
     # JOIN
@@ -163,38 +254,91 @@ class VoiceChatReceiver:
         self,
         chat_id: int,
     ) -> bool:
-        """
-        Mark a VC as active for speech receiving.
-
-        We intentionally do NOT call the old PyTgCalls record()
-        API because the installed version does not provide the
-        compatible RecordStream interface.
-        """
 
         chat_id = int(chat_id)
 
-        await self.register()
+        # Already connected.
+        if chat_id in self.joined_chats:
 
-        if not self._frame_capture_available:
-            logger.warning(
-                "VC receiver joined logically for %s, but incoming "
-                "speech capture is unavailable with the installed "
-                "PyTgCalls API.",
+            logger.info(
+                "VC receiver already joined for %s",
                 chat_id,
             )
 
-            # Do not pretend that audio capture is working.
-            # Returning False allows caller to handle this safely.
+            return True
+
+        try:
+
+            # ------------------------------------------------
+            # IMPORTANT:
+            #
+            # Current PyTgCalls supports:
+            #
+            # await calls.play(chat_id, None)
+            #
+            # This creates/connects the group-call transport
+            # without requiring an audio file.
+            # ------------------------------------------------
+
+            play = getattr(
+                self.calls,
+                "play",
+                None,
+            )
+
+            if play is None:
+
+                raise RuntimeError(
+                    "Installed PyTgCalls does not expose play()."
+                )
+
+            result = play(
+                chat_id,
+                None,
+            )
+
+            if inspect.isawaitable(result):
+                await result
+
+            self.joined_chats.add(
+                chat_id
+            )
+
+            logger.info(
+                "VC receiver joined successfully for %s",
+                chat_id,
+            )
+
+            if not self._registered:
+                await self.register()
+
+            if self._speech_capture_available:
+
+                logger.info(
+                    "VC speech capture enabled for %s",
+                    chat_id,
+                )
+
+            else:
+
+                logger.warning(
+                    "VC receiver joined logically for %s, "
+                    "but incoming speech capture is unavailable "
+                    "with the installed PyTgCalls API.",
+                    chat_id,
+                )
+
+            return True
+
+        except Exception as exc:
+
+            logger.warning(
+                "VC join failed for %s: %s",
+                chat_id,
+                exc,
+            )
+
             return False
-
-        self.active_chats.add(chat_id)
-
-        logger.info(
-            "VC speech receiver activated for chat %s",
-            chat_id,
-        )
-
-        return True
 
     # ========================================================
     # LEAVE
@@ -203,510 +347,93 @@ class VoiceChatReceiver:
     async def leave(
         self,
         chat_id: int,
-    ) -> None:
+    ) -> bool:
 
         chat_id = int(chat_id)
 
-        self.active_chats.discard(chat_id)
-
-        for key in list(self.buffers):
-            if key[0] == chat_id:
-                self.buffers.pop(key, None)
-
-        logger.info(
-            "VC speech receiver stopped for chat %s",
-            chat_id,
-        )
-
-    # ========================================================
-    # RMS
-    # ========================================================
-
-    @staticmethod
-    def _rms(
-        data: bytes,
-    ) -> float:
-
-        if not data:
-            return 0.0
-
-        usable_length = (
-            len(data)
-            - (len(data) % 2)
-        )
-
-        if usable_length <= 0:
-            return 0.0
-
-        count = usable_length // 2
-
         try:
-            samples = struct.unpack(
-                f"<{count}h",
-                data[:usable_length],
-            )
-        except struct.error:
-            return 0.0
 
-        if not samples:
-            return 0.0
-
-        mean = sum(
-            sample * sample
-            for sample in samples
-        ) / len(samples)
-
-        return mean ** 0.5
-
-    # ========================================================
-    # WAV
-    # ========================================================
-
-    @classmethod
-    def _wav(
-        cls,
-        pcm: bytes,
-    ) -> bytes:
-
-        output = io.BytesIO()
-
-        with wave.open(
-            output,
-            "wb",
-        ) as wav:
-
-            wav.setnchannels(
-                cls.CHANNELS
-            )
-
-            wav.setsampwidth(
-                cls.SAMPLE_WIDTH
-            )
-
-            wav.setframerate(
-                cls.SAMPLE_RATE
-            )
-
-            wav.writeframes(
-                pcm
-            )
-
-        return output.getvalue()
-
-    # ========================================================
-    # FRAME HANDLER
-    # ========================================================
-
-    async def _handle_frames(
-        self,
-        update,
-    ) -> None:
-
-        chat_id = getattr(
-            update,
-            "chat_id",
-            None,
-        )
-
-        if chat_id is None:
-            return
-
-        try:
-            chat_id = int(chat_id)
-        except Exception:
-            return
-
-        if chat_id not in self.active_chats:
-            return
-
-        frames = getattr(
-            update,
-            "frames",
-            None,
-        )
-
-        if not frames:
-            return
-
-        now = time.monotonic()
-
-        for frame in frames:
-
-            ssrc = getattr(
-                frame,
-                "ssrc",
-                0,
-            )
-
-            try:
-                ssrc = int(ssrc or 0)
-            except Exception:
-                ssrc = 0
-
-            if not ssrc:
-                continue
-
-            data = getattr(
-                frame,
-                "frame",
+            leave_call = getattr(
+                self.calls,
+                "leave_call",
                 None,
             )
 
-            if not data:
-                continue
+            if leave_call is None:
 
-            try:
-                data = bytes(data)
-            except Exception:
-                continue
-
-            key = (
-                chat_id,
-                ssrc,
-            )
-
-            buffer = self.buffers.setdefault(
-                key,
-                SpeechBuffer(),
-            )
-
-            voice_detected = (
-                self._rms(data)
-                >= self.RMS_THRESHOLD
-            )
-
-            # ------------------------------------------------
-            # VOICE
-            # ------------------------------------------------
-
-            if voice_detected:
-
-                if not buffer.chunks:
-                    buffer.started_at = now
-
-                buffer.last_voice_at = now
-
-                buffer.chunks.append(
-                    data
+                raise RuntimeError(
+                    "Installed PyTgCalls does not expose leave_call()."
                 )
 
-                buffer.bytes_count += len(
-                    data
-                )
-
-            # ------------------------------------------------
-            # SILENCE
-            # ------------------------------------------------
-
-            elif buffer.chunks:
-
-                buffer.chunks.append(
-                    data
-                )
-
-                buffer.bytes_count += len(
-                    data
-                )
-
-                if (
-                    now
-                    - buffer.last_voice_at
-                    >= self.SILENCE_SECONDS
-                ):
-
-                    await self._flush(
-                        chat_id,
-                        ssrc,
-                        buffer,
-                    )
-
-                    self.buffers.pop(
-                        key,
-                        None,
-                    )
-
-            # ------------------------------------------------
-            # MAX SPEECH
-            # ------------------------------------------------
-
-            if (
-                buffer.chunks
-                and
-                now
-                - buffer.started_at
-                >= self.MAX_SPEECH_SECONDS
-            ):
-
-                await self._flush(
-                    chat_id,
-                    ssrc,
-                    buffer,
-                )
-
-                self.buffers.pop(
-                    key,
-                    None,
-                )
-
-    # ========================================================
-    # RESOLVE USER
-    # ========================================================
-
-    async def _resolve_user(
-        self,
-        chat_id: int,
-        ssrc: int,
-    ) -> Optional[int]:
-
-        get_participants = getattr(
-            self.calls,
-            "get_participants",
-            None,
-        )
-
-        if get_participants is None:
-            return None
-
-        try:
-            participants = await get_participants(
+            result = leave_call(
                 chat_id
             )
-        except Exception:
-            return None
 
-        for participant in (
-            participants or []
-        ):
+            if inspect.isawaitable(result):
+                await result
 
-            user_id = getattr(
-                participant,
-                "user_id",
-                None,
+            self.joined_chats.discard(
+                chat_id
             )
-
-            if not user_id:
-                continue
-
-            # ------------------------------------------------
-            # Direct source
-            # ------------------------------------------------
-
-            source = getattr(
-                participant,
-                "source",
-                None,
-            )
-
-            if source is not None:
-
-                try:
-                    if int(source) == ssrc:
-                        return int(user_id)
-                except Exception:
-                    pass
-
-            # ------------------------------------------------
-            # Video / presentation sources
-            # ------------------------------------------------
-
-            for attr in (
-                "video_info",
-                "presentation_info",
-            ):
-
-                info = getattr(
-                    participant,
-                    attr,
-                    None,
-                )
-
-                if info is None:
-                    continue
-
-                groups = getattr(
-                    info,
-                    "sources",
-                    None,
-                )
-
-                if not groups:
-                    continue
-
-                for group in groups:
-
-                    values = getattr(
-                        group,
-                        "sources",
-                        None,
-                    )
-
-                    if not values:
-                        continue
-
-                    for value in values:
-
-                        try:
-                            if (
-                                int(value)
-                                & 0xFFFFFFFF
-                            ) == (
-                                ssrc
-                                & 0xFFFFFFFF
-                            ):
-                                return int(
-                                    user_id
-                                )
-
-                        except Exception:
-                            continue
-
-        return None
-
-    # ========================================================
-    # FLUSH SPEECH
-    # ========================================================
-
-    async def _flush(
-        self,
-        chat_id: int,
-        ssrc: int,
-        buffer: SpeechBuffer,
-    ) -> None:
-
-        if not buffer.chunks:
-            return
-
-        bytes_per_second = (
-            self.SAMPLE_RATE
-            * self.CHANNELS
-            * self.SAMPLE_WIDTH
-        )
-
-        duration = (
-            buffer.bytes_count
-            / bytes_per_second
-        )
-
-        if duration < self.MIN_SPEECH_SECONDS:
-            return
-
-        user_id = await self._resolve_user(
-            chat_id,
-            ssrc,
-        )
-
-        if not user_id:
-            logger.debug(
-                "Unable to map SSRC %s to Telegram user "
-                "in chat %s.",
-                ssrc,
-                chat_id,
-            )
-            return
-
-        pcm = b"".join(
-            buffer.chunks
-        )
-
-        filename = (
-            f"zara_vc_"
-            f"{chat_id}_"
-            f"{ssrc}_"
-            f"{int(time.time() * 1000)}"
-            f".wav"
-        )
-
-        path = (
-            Path(gettempdir())
-            / filename
-        )
-
-        try:
-
-            path.write_bytes(
-                self._wav(pcm)
-            )
-
-            task = asyncio.create_task(
-                self._transcribe_and_dispatch(
-                    chat_id,
-                    user_id,
-                    path,
-                )
-            )
-
-            self._tasks.add(
-                task
-            )
-
-            task.add_done_callback(
-                self._tasks.discard
-            )
-
-        except Exception:
-            logger.exception(
-                "Failed creating VC speech WAV."
-            )
-
-    # ========================================================
-    # TRANSCRIBE
-    # ========================================================
-
-    async def _transcribe_and_dispatch(
-        self,
-        chat_id: int,
-        user_id: int,
-        path: Path,
-    ) -> None:
-
-        try:
-
-            from voice.stt import transcribe
-
-            result = await transcribe(
-                path,
-                language="hi",
-            )
-
-            text = getattr(
-                result,
-                "text",
-                "",
-            )
-
-            text = str(
-                text
-            ).strip()
-
-            if not text:
-                return
 
             logger.info(
-                "VC speech chat=%s user=%s: %s",
+                "VC speech receiver stopped for chat %s",
                 chat_id,
-                user_id,
-                text,
             )
 
-            await self.on_transcript(
+            return True
+
+        except Exception as exc:
+
+            # If PyTgCalls says we are not in a call,
+            # still clean our local state.
+            self.joined_chats.discard(
+                chat_id
+            )
+
+            logger.warning(
+                "VC leave failed for %s: %s",
                 chat_id,
-                user_id,
-                text,
+                exc,
             )
 
-        except Exception:
-            logger.exception(
-                "VC speech transcription failed."
+            return False
+
+    # ========================================================
+    # IS JOINED
+    # ========================================================
+
+    def is_joined(
+        self,
+        chat_id: int,
+    ) -> bool:
+
+        return int(chat_id) in self.joined_chats
+
+    # ========================================================
+    # STOP
+    # ========================================================
+
+    async def stop(
+        self,
+        chat_id: Optional[int] = None,
+    ) -> None:
+
+        if chat_id is not None:
+
+            await self.leave(
+                int(chat_id)
             )
 
-        finally:
+            return
 
-            try:
-                path.unlink(
-                    missing_ok=True
-                )
-            except Exception:
-                pass
+        for current_chat_id in list(
+            self.joined_chats
+        ):
+
+            await self.leave(
+                current_chat_id
+            )
 
     # ========================================================
     # CLEANUP
@@ -714,23 +441,28 @@ class VoiceChatReceiver:
 
     async def cleanup(self) -> None:
 
-        self.active_chats.clear()
-        self.buffers.clear()
+        for chat_id in list(
+            self.joined_chats
+        ):
 
-        if self._tasks:
+            try:
 
-            await asyncio.gather(
-                *self._tasks,
-                return_exceptions=True,
-            )
+                await self.leave(
+                    chat_id
+                )
 
-        self._tasks.clear()
+            except Exception:
+
+                logger.exception(
+                    "Failed to cleanup VC %s",
+                    chat_id,
+                )
+
+        self.joined_chats.clear()
+
+        self._registered = False
+        self._speech_capture_available = False
 
         logger.info(
-            "VoiceChatReceiver cleaned up."
+            "VC receiver cleanup completed."
         )
-
-
-__all__ = [
-    "VoiceChatReceiver",
-]
