@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from audio.stream import AudioStream
+
 from music.queue import (
     Track,
     add_to_queue,
@@ -29,6 +30,15 @@ class PlayerState:
 class MusicPlayer:
     """
     FIFO Telegram VC music player.
+
+    Handles:
+    - Queue
+    - Current track
+    - Playback
+    - Skip
+    - Pause/resume
+    - Loop
+    - Playback failures
     """
 
     def __init__(
@@ -105,30 +115,35 @@ class MusicPlayer:
             chat_id
         )
 
-        should_play = (
+        should_start = (
             play_now
             or (
                 player.current is None
                 and not player.playing
+                and not player.paused
             )
         )
 
         logger.info(
-            "Track added: chat=%s title=%s play_now=%s",
+            "Track added chat=%s title=%s "
+            "position=%s play_now=%s",
             chat_id,
             track.title,
-            should_play,
+            position,
+            play_now,
         )
 
-        if should_play:
+        if should_start:
+
             started = await self.play_next(
                 chat_id
             )
 
             if not started:
+
                 logger.error(
-                    "Track was queued but playback failed: chat=%s title=%s",
-                    chat_id,
+                    "Track could not start "
+                    "after being added: %s",
                     track.title,
                 )
 
@@ -152,56 +167,79 @@ class MusicPlayer:
         track = player.current
 
         if track is None:
+
             logger.warning(
-                "play_current called with no current track: %s",
+                "play_current called with "
+                "no current track: %s",
                 chat_id,
             )
+
             return False
 
-        if not track.audio_path:
+        path = getattr(
+            track,
+            "audio_path",
+            None,
+        )
+
+        if not path:
+
             logger.error(
-                "Track has no audio path: %s",
+                "Track has no audio_path: %s",
                 track.title,
             )
+
             return False
 
         logger.info(
-            "Playing current track: chat=%s title=%s path=%s",
+            "Playing track chat=%s "
+            "title=%s path=%s",
             chat_id,
             track.title,
-            track.audio_path,
+            path,
+        )
+
+        video = (
+            getattr(
+                track,
+                "media_type",
+                "audio",
+            )
+            == "video"
         )
 
         ok = await self.audio_stream.play(
             chat_id,
-            track.audio_path,
-            video=(
-                getattr(
-                    track,
-                    "media_type",
-                    "audio",
-                )
-                == "video"
-            ),
+            path,
+            video=video,
         )
 
-        player.playing = bool(ok)
+        if ok:
+
+            player.playing = True
+            player.paused = False
+
+            logger.info(
+                "Track playback confirmed "
+                "chat=%s title=%s",
+                chat_id,
+                track.title,
+            )
+
+            return True
+
+        player.playing = False
         player.paused = False
 
-        if ok:
-            logger.info(
-                "Music playback active: chat=%s title=%s",
-                chat_id,
-                track.title,
-            )
-        else:
-            logger.error(
-                "Music playback failed: chat=%s title=%s",
-                chat_id,
-                track.title,
-            )
+        logger.error(
+            "Track playback failed "
+            "chat=%s title=%s path=%s",
+            chat_id,
+            track.title,
+            path,
+        )
 
-        return bool(ok)
+        return False
 
     # ========================================================
     # PLAY NEXT
@@ -222,16 +260,31 @@ class MusicPlayer:
                 chat_id
             )
 
+            # ------------------------------------------------
+            # Loop current track
+            # ------------------------------------------------
+
             if (
                 player.loop
                 and player.current is not None
             ):
+
+                logger.info(
+                    "Looping current track "
+                    "in %s",
+                    chat_id,
+                )
+
                 return await self.play_current(
                     chat_id
                 )
 
             player.playing = False
             player.paused = False
+
+            # ------------------------------------------------
+            # Get next playable track
+            # ------------------------------------------------
 
             while True:
 
@@ -240,10 +293,13 @@ class MusicPlayer:
                 )
 
                 if track is None:
+
                     player.current = None
+                    player.playing = False
+                    player.paused = False
 
                     logger.info(
-                        "No more tracks in queue: %s",
+                        "Queue empty for %s",
                         chat_id,
                     )
 
@@ -252,9 +308,15 @@ class MusicPlayer:
                 player.current = track
 
                 logger.info(
-                    "Starting next track: chat=%s title=%s",
+                    "Trying next track "
+                    "chat=%s title=%s path=%s",
                     chat_id,
                     track.title,
+                    getattr(
+                        track,
+                        "audio_path",
+                        None,
+                    ),
                 )
 
                 ok = await self.play_current(
@@ -264,16 +326,31 @@ class MusicPlayer:
                 if ok:
                     return True
 
+                # Playback failed.
+                # Do not leave a broken current track
+                # blocking the queue.
+
                 logger.error(
-                    "Skipping failed track: %s",
+                    "Skipping unplayable track "
+                    "chat=%s title=%s",
+                    chat_id,
                     track.title,
                 )
 
                 player.current = None
+                player.playing = False
+                player.paused = False
 
                 if is_queue_empty(
                     chat_id
                 ):
+
+                    logger.error(
+                        "No playable tracks remain "
+                        "in queue %s",
+                        chat_id,
+                    )
+
                     return False
 
     # ========================================================
@@ -294,30 +371,42 @@ class MusicPlayer:
         player.playing = False
         player.paused = False
 
-        logger.info(
-            "Stream ended: %s",
-            chat_id,
-        )
-
         if (
             player.loop
             and player.current is not None
         ):
+
             return await self.play_current(
                 chat_id
             )
 
+        logger.info(
+            "Stream ended chat=%s "
+            "track=%s",
+            chat_id,
+            (
+                player.current.title
+                if player.current
+                else None
+            ),
+        )
+
         player.current = None
 
-        self.audio_stream.current_streams.pop(
-            chat_id,
-            None,
-        )
+        try:
 
-        self.audio_stream.current_media.pop(
-            chat_id,
-            None,
-        )
+            self.audio_stream.current_streams.pop(
+                chat_id,
+                None,
+            )
+
+            self.audio_stream.current_media.pop(
+                chat_id,
+                None,
+            )
+
+        except Exception:
+            pass
 
         return await self.play_next(
             chat_id
@@ -331,6 +420,8 @@ class MusicPlayer:
         self,
         chat_id: int,
     ) -> bool:
+
+        chat_id = int(chat_id)
 
         player = self._player(
             chat_id
@@ -377,11 +468,13 @@ class MusicPlayer:
                 )
 
             logger.info(
-                "Music player stopped: %s",
+                "Music stopped chat=%s "
+                "clear=%s",
                 chat_id,
+                clear,
             )
 
-            return bool(ok)
+            return ok
 
     # ========================================================
     # PAUSE
@@ -392,11 +485,14 @@ class MusicPlayer:
         chat_id: int,
     ) -> bool:
 
+        chat_id = int(chat_id)
+
         ok = await self.audio_stream.pause(
-            int(chat_id)
+            chat_id
         )
 
         if ok:
+
             player = self._player(
                 chat_id
             )
@@ -415,11 +511,14 @@ class MusicPlayer:
         chat_id: int,
     ) -> bool:
 
+        chat_id = int(chat_id)
+
         ok = await self.audio_stream.resume(
-            int(chat_id)
+            chat_id
         )
 
         if ok:
+
             player = self._player(
                 chat_id
             )
@@ -439,11 +538,15 @@ class MusicPlayer:
         enabled: bool,
     ) -> bool:
 
-        self._player(
+        player = self._player(
             chat_id
-        ).loop = bool(enabled)
+        )
 
-        return bool(enabled)
+        player.loop = bool(
+            enabled
+        )
+
+        return player.loop
 
     def toggle_loop(
         self,
@@ -459,7 +562,7 @@ class MusicPlayer:
         return player.loop
 
     # ========================================================
-    # GETTERS
+    # CURRENT
     # ========================================================
 
     def current(
@@ -476,6 +579,10 @@ class MusicPlayer:
             if player
             else None
         )
+
+    # ========================================================
+    # QUEUE
+    # ========================================================
 
     def get_queue(
         self,
@@ -494,6 +601,10 @@ class MusicPlayer:
         return queue_size(
             int(chat_id)
         )
+
+    # ========================================================
+    # STATE
+    # ========================================================
 
     def is_playing(
         self,
@@ -523,6 +634,10 @@ class MusicPlayer:
             player
             and player.paused
         )
+
+    # ========================================================
+    # STATUS
+    # ========================================================
 
     def get_status(
         self,
@@ -559,7 +674,7 @@ class MusicPlayer:
         }
 
     # ========================================================
-    # CLEANUP
+    # CLEANUP CHAT
     # ========================================================
 
     async def cleanup_chat(
@@ -587,6 +702,10 @@ class MusicPlayer:
             None,
         )
 
+    # ========================================================
+    # CLEANUP
+    # ========================================================
+
     async def cleanup(self) -> None:
 
         for chat_id in list(
@@ -594,17 +713,27 @@ class MusicPlayer:
         ):
 
             try:
+
                 await self.cleanup_chat(
                     chat_id
                 )
+
             except Exception:
+
                 logger.exception(
-                    "Music cleanup failed for %s",
+                    "Music cleanup failed "
+                    "for %s",
                     chat_id,
                 )
 
 
-_player: Optional[MusicPlayer] = None
+# ============================================================
+# SINGLETON
+# ============================================================
+
+_player: Optional[
+    MusicPlayer
+] = None
 
 
 def get_player(
@@ -614,6 +743,7 @@ def get_player(
     global _player
 
     if _player is None:
+
         _player = MusicPlayer(
             audio_stream
         )
@@ -634,4 +764,4 @@ __all__ = [
     "MusicPlayer",
     "get_player",
     "reset_player",
-]
+        ]
