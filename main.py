@@ -1,5 +1,3 @@
-# main.py
-
 import asyncio
 import logging
 import signal
@@ -69,7 +67,7 @@ _tasks = []
 
 
 # ============================================================
-# OPTIONAL MODULE IMPORTS
+# DATABASE
 # ============================================================
 
 async def initialize_database():
@@ -85,13 +83,15 @@ async def initialize_database():
         if asyncio.iscoroutine(result):
             await result
 
-        logger.info("MongoDB initialized.")
+        logger.info(
+            "MongoDB initialized."
+        )
 
     except ImportError:
-        logger.warning(
-            "database.mongodb is not ready yet. "
-            "Database initialization skipped."
+        logger.exception(
+            "Database initialization import failed."
         )
+        raise
 
     except Exception:
         logger.exception(
@@ -99,6 +99,10 @@ async def initialize_database():
         )
         raise
 
+
+# ============================================================
+# TELEGRAM
+# ============================================================
 
 async def initialize_telegram():
     """
@@ -111,7 +115,11 @@ async def initialize_telegram():
             start_polling,
         )
 
-        result = await start_telegram()
+        logger.info(
+            "Telegram client module imported successfully."
+        )
+
+        await start_telegram()
 
         logger.info(
             "Telegram system initialized."
@@ -125,6 +133,10 @@ async def initialize_telegram():
             start_polling()
         )
 
+        _tasks.append(
+            polling_task
+        )
+
         logger.info(
             "Telegram bot polling started."
         )
@@ -132,18 +144,21 @@ async def initialize_telegram():
         return polling_task
 
     except ImportError:
-        logger.warning(
-            "telegram.client is not ready yet. "
-            "Telegram initialization skipped."
+        logger.exception(
+            "Telegram initialization import failed."
         )
-
-        return None
+        raise
 
     except Exception:
         logger.exception(
             "Telegram initialization failed."
         )
         raise
+
+
+# ============================================================
+# SCHEDULER
+# ============================================================
 
 async def initialize_scheduler():
     """
@@ -152,6 +167,10 @@ async def initialize_scheduler():
 
     try:
         from utils.scheduler import start_scheduler
+
+        logger.info(
+            "Scheduler module imported successfully."
+        )
 
         result = start_scheduler()
 
@@ -165,10 +184,10 @@ async def initialize_scheduler():
         return result
 
     except ImportError:
-        logger.exception(
-           "Telegram initialization import failed."
+        logger.warning(
+            "Scheduler module is not available. "
+            "Skipping scheduler initialization."
         )
-    raise
 
         return None
 
@@ -189,11 +208,13 @@ async def startup():
     """
 
     logger.info("=" * 60)
+
     logger.info(
         "Starting %s v%s",
         APP_NAME,
         APP_VERSION,
     )
+
     logger.info("=" * 60)
 
     # --------------------------------------------------------
@@ -260,12 +281,7 @@ async def startup():
         "Initializing Telegram..."
     )
 
-    telegram_result = await initialize_telegram()
-
-    if telegram_result is not None:
-        _tasks.append(
-            telegram_result
-        )
+    await initialize_telegram()
 
     # --------------------------------------------------------
     # Scheduler
@@ -278,19 +294,28 @@ async def startup():
     scheduler_result = await initialize_scheduler()
 
     if scheduler_result is not None:
-        _tasks.append(
-            scheduler_result
-        )
+        if (
+            asyncio.isfuture(scheduler_result)
+            or isinstance(
+                scheduler_result,
+                asyncio.Task,
+            )
+        ):
+            _tasks.append(
+                scheduler_result
+            )
 
     # --------------------------------------------------------
     # Startup complete
     # --------------------------------------------------------
 
     logger.info("=" * 60)
+
     logger.info(
         "%s is now ONLINE.",
         APP_NAME,
     )
+
     logger.info("=" * 60)
 
 
@@ -304,6 +329,7 @@ async def shutdown():
     """
 
     logger.info("=" * 60)
+
     logger.info(
         "Shutting down %s...",
         APP_NAME,
@@ -313,11 +339,19 @@ async def shutdown():
     # Stop running tasks
     # --------------------------------------------------------
 
+    current_task = asyncio.current_task()
+
     for task in list(_tasks):
         try:
-            if asyncio.isfuture(task) or isinstance(
-                task,
-                asyncio.Task,
+            if task is current_task:
+                continue
+
+            if (
+                asyncio.isfuture(task)
+                or isinstance(
+                    task,
+                    asyncio.Task,
+                )
             ):
                 if not task.done():
                     task.cancel()
@@ -351,7 +385,9 @@ async def shutdown():
         )
 
     except ImportError:
-        pass
+        logger.warning(
+            "Telegram shutdown module is not available."
+        )
 
     except Exception:
         logger.exception(
@@ -375,7 +411,9 @@ async def shutdown():
         )
 
     except ImportError:
-        pass
+        logger.warning(
+            "Database shutdown module is not available."
+        )
 
     except Exception:
         logger.exception(
@@ -478,23 +516,45 @@ def main():
             "Keyboard interrupt received."
         )
 
+        if not _shutdown_event.is_set():
+            _shutdown_event.set()
+
+        with suppress(Exception):
+            loop.run_until_complete(
+                shutdown()
+            )
+
     except Exception:
         logger.exception(
             "Fatal application error."
         )
 
+        with suppress(Exception):
+            loop.run_until_complete(
+                shutdown()
+            )
+
     finally:
-        # Cancel any remaining tasks.
+        # ----------------------------------------------------
+        # Cancel remaining tasks
+        # ----------------------------------------------------
+
         pending = asyncio.all_tasks(
             loop
         )
 
+        current = asyncio.current_task(
+            loop=loop
+        )
+
         for task in pending:
-            task.cancel()
+            if task is not current:
+                task.cancel()
 
         if pending:
             with suppress(
-                asyncio.CancelledError
+                asyncio.CancelledError,
+                Exception,
             ):
                 loop.run_until_complete(
                     asyncio.gather(
