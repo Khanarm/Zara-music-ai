@@ -418,7 +418,7 @@ async def handle_music_intent(
             track = Track(
                 title=result.title,
                 url=result.url,
-                audio_url=result.url
+                audio_url=result.url,
                 audio_path=path,
                 duration=result.duration,
                 requested_by=message.from_user.id,
