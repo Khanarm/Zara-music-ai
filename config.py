@@ -121,6 +121,10 @@ DEBUG = get_bool(
     False,
 )
 
+LOG_LEVEL = get_env(
+    "LOG_LEVEL",
+    "INFO",
+).upper()
 
 # ============================================================
 # TELEGRAM API
