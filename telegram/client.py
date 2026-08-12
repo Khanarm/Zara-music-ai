@@ -43,8 +43,6 @@ voice_music_controller = None
 # ============================================================
 
 def create_bot() -> Bot:
-    """Create the Telegram Bot API client."""
-
     global bot
 
     if bot is not None:
@@ -70,8 +68,6 @@ def create_bot() -> Bot:
 # ============================================================
 
 def create_dispatcher() -> Dispatcher:
-    """Create the Aiogram dispatcher."""
-
     global dp
 
     if dp is not None:
@@ -89,12 +85,6 @@ def create_dispatcher() -> Dispatcher:
 # ============================================================
 
 def create_user_client() -> TelegramClient:
-    """
-    Create the Telethon user client.
-
-    STRING_SESSION is optional.
-    """
-
     global user_client
 
     if user_client is not None:
@@ -127,8 +117,6 @@ def create_user_client() -> TelegramClient:
 # ============================================================
 
 async def start_bot() -> Bot:
-    """Initialize the Bot API client."""
-
     client = create_bot()
 
     await client.delete_webhook(
@@ -151,8 +139,6 @@ async def start_bot() -> Bot:
 # ============================================================
 
 async def start_user_client() -> TelegramClient:
-    """Start the Telethon user client."""
-
     client = create_user_client()
 
     if not client.is_connected():
@@ -186,21 +172,15 @@ async def start_telegram() -> tuple[
     Dispatcher,
     TelegramClient,
 ]:
-    """
-    Initialize all Telegram clients,
-    handlers, music and VC systems.
-    """
 
-    global (
-        music_calls,
-        audio_stream,
-        music_player,
-        music_downloader,
-        music_searcher,
-        music_controls,
-        voice_receiver,
-        voice_music_controller,
-    )
+    global music_calls
+    global audio_stream
+    global music_player
+    global music_downloader
+    global music_searcher
+    global music_controls
+    global voice_receiver
+    global voice_music_controller
 
     # --------------------------------------------------------
     # BOT
@@ -245,6 +225,7 @@ async def start_telegram() -> tuple[
     if MUSIC_ENABLED:
 
         try:
+
             # ------------------------------------------------
             # PyTgCalls
             # ------------------------------------------------
@@ -289,7 +270,7 @@ async def start_telegram() -> tuple[
             )
 
             # ------------------------------------------------
-            # Create audio stream
+            # Audio stream
             # ------------------------------------------------
 
             audio_stream = AudioStream(
@@ -374,16 +355,6 @@ async def start_telegram() -> tuple[
                 on_transcript=voice_music_controller.handle,
             )
 
-            # Register receiver events.
-            #
-            # IMPORTANT:
-            # The current PyTgCalls version does not expose
-            # the old filters.stream_frame() API.
-            #
-            # The receiver itself is responsible for handling
-            # registration according to the installed API.
-            # ------------------------------------------------
-
             await voice_receiver.register()
 
             logger.info(
@@ -391,7 +362,7 @@ async def start_telegram() -> tuple[
             )
 
             # ------------------------------------------------
-            # FINAL SUCCESS
+            # SUCCESS
             # ------------------------------------------------
 
             logger.info(
@@ -399,12 +370,10 @@ async def start_telegram() -> tuple[
             )
 
         except Exception:
+
             logger.exception(
                 "Music system initialization failed."
             )
-
-            # Do not leave partially initialized services
-            # behind.
 
             music_calls = None
             audio_stream = None
@@ -416,6 +385,7 @@ async def start_telegram() -> tuple[
             voice_music_controller = None
 
     else:
+
         logger.info(
             "Music system disabled by configuration."
         )
@@ -432,7 +402,6 @@ async def start_telegram() -> tuple[
 # ============================================================
 
 async def start_polling() -> None:
-    """Start Aiogram polling."""
 
     bot_client = create_bot()
     dispatcher = create_dispatcher()
@@ -451,9 +420,6 @@ async def start_polling() -> None:
 # ============================================================
 
 def get_music_services():
-    """
-    Return music services.
-    """
 
     if (
         music_player is None
@@ -479,9 +445,6 @@ def get_music_services():
 # ============================================================
 
 def get_voice_music_services():
-    """
-    Return VC voice services.
-    """
 
     if (
         voice_receiver is None
@@ -502,7 +465,6 @@ def get_voice_music_services():
 # ============================================================
 
 async def stop_user_client() -> None:
-    """Disconnect Telethon client."""
 
     global user_client
 
@@ -510,6 +472,7 @@ async def stop_user_client() -> None:
         return
 
     try:
+
         if user_client.is_connected():
             await user_client.disconnect()
 
@@ -518,11 +481,13 @@ async def stop_user_client() -> None:
         )
 
     except Exception:
+
         logger.exception(
             "Failed to stop Telethon user client."
         )
 
     finally:
+
         user_client = None
 
 
@@ -531,7 +496,6 @@ async def stop_user_client() -> None:
 # ============================================================
 
 async def stop_bot() -> None:
-    """Close Bot API session."""
 
     global bot
 
@@ -539,6 +503,7 @@ async def stop_bot() -> None:
         return
 
     try:
+
         await bot.session.close()
 
         logger.info(
@@ -546,11 +511,13 @@ async def stop_bot() -> None:
         )
 
     except Exception:
+
         logger.exception(
             "Failed to stop Aiogram bot."
         )
 
     finally:
+
         bot = None
 
 
@@ -559,30 +526,28 @@ async def stop_bot() -> None:
 # ============================================================
 
 async def stop_telegram() -> None:
-    """
-    Gracefully stop all Telegram,
-    music and voice services.
-    """
 
-    global (
-        music_calls,
-        audio_stream,
-        music_player,
-        music_downloader,
-        music_searcher,
-        music_controls,
-        voice_receiver,
-        voice_music_controller,
-    )
+    global music_calls
+    global audio_stream
+    global music_player
+    global music_downloader
+    global music_searcher
+    global music_controls
+    global voice_receiver
+    global voice_music_controller
 
     # --------------------------------------------------------
     # VC receiver
     # --------------------------------------------------------
 
     if voice_receiver is not None:
+
         try:
+
             await voice_receiver.cleanup()
+
         except Exception:
+
             logger.exception(
                 "Failed to cleanup VC voice receiver."
             )
@@ -592,9 +557,13 @@ async def stop_telegram() -> None:
     # --------------------------------------------------------
 
     if music_player is not None:
+
         try:
+
             await music_player.cleanup()
+
         except Exception:
+
             logger.exception(
                 "Failed to cleanup music player."
             )
@@ -604,9 +573,13 @@ async def stop_telegram() -> None:
     # --------------------------------------------------------
 
     if audio_stream is not None:
+
         try:
+
             await audio_stream.cleanup()
+
         except Exception:
+
             logger.exception(
                 "Failed to cleanup audio stream."
             )
@@ -616,7 +589,9 @@ async def stop_telegram() -> None:
     # --------------------------------------------------------
 
     if music_calls is not None:
+
         try:
+
             stop_method = getattr(
                 music_calls,
                 "stop",
@@ -624,18 +599,23 @@ async def stop_telegram() -> None:
             )
 
             if stop_method is not None:
+
                 result = stop_method()
 
-                if hasattr(result, "__await__"):
+                if hasattr(
+                    result,
+                    "__await__",
+                ):
                     await result
 
         except Exception:
+
             logger.exception(
                 "Failed to stop PyTgCalls."
             )
 
     # --------------------------------------------------------
-    # Reset services
+    # Reset
     # --------------------------------------------------------
 
     music_calls = None
@@ -664,7 +644,6 @@ async def stop_telegram() -> None:
 # ============================================================
 
 def get_bot() -> Bot:
-    """Return the current Bot instance."""
 
     if bot is None:
         return create_bot()
@@ -677,7 +656,6 @@ def get_bot() -> Bot:
 # ============================================================
 
 def get_dispatcher() -> Dispatcher:
-    """Return the current Dispatcher."""
 
     if dp is None:
         return create_dispatcher()
@@ -690,7 +668,6 @@ def get_dispatcher() -> Dispatcher:
 # ============================================================
 
 def get_user_client() -> TelegramClient:
-    """Return the Telethon client."""
 
     if user_client is None:
         return create_user_client()
@@ -703,9 +680,6 @@ def get_user_client() -> TelegramClient:
 # ============================================================
 
 async def telegram_health() -> dict:
-    """
-    Return Telegram connection status.
-    """
 
     result = {
         "bot": False,
@@ -715,10 +689,11 @@ async def telegram_health() -> dict:
     }
 
     # --------------------------------------------------------
-    # Bot health
+    # Bot
     # --------------------------------------------------------
 
     try:
+
         client = get_bot()
 
         me = await client.get_me()
@@ -732,15 +707,17 @@ async def telegram_health() -> dict:
         )
 
     except Exception:
+
         logger.exception(
             "Bot health check failed."
         )
 
     # --------------------------------------------------------
-    # Telethon health
+    # Telethon
     # --------------------------------------------------------
 
     try:
+
         client = get_user_client()
 
         if client.is_connected():
@@ -758,6 +735,7 @@ async def telegram_health() -> dict:
                 )
 
     except Exception:
+
         logger.exception(
             "Telethon health check failed."
         )
@@ -770,10 +748,6 @@ async def telegram_health() -> dict:
 # ============================================================
 
 class TelegramManager:
-    """
-    Convenience manager for starting and stopping
-    all Telegram clients.
-    """
 
     def __init__(self) -> None:
 
