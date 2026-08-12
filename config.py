@@ -263,7 +263,7 @@ GEMINI_API_KEY = get_env(
 
 GEMINI_MODEL = get_env(
     "GEMINI_MODEL",
-    "gemini-2.5-flash",
+    "gemini-3.6-flash",
 )
 
 AI_MAX_HISTORY = get_int(
