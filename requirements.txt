@@ -21,3 +21,4 @@ pydantic-settings>=2.7.0
 loguru>=0.7.3
 yt-dlp>=2025.1.15
 youtube-search-python>=1.6.6
+httpx==0.27.2
