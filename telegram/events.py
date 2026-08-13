@@ -960,71 +960,87 @@ async def handle_music_intent(
             )
 
             
-# ------------------------------------------------
-# WAIT FOR VC JOIN
-# ------------------------------------------------
+            # ------------------------------------------------
+            # WAIT FOR VC JOIN
+            # ------------------------------------------------
 
-if join_task:
+            if join_task:
 
-    try:
-        joined = await join_task
+                try:
+                    joined = await join_task
 
-    except Exception:
+                except Exception:
+                    logger.exception("VC join failed.")
+                    joined = False
 
-        logger.exception(
-            "VC join failed."
-        )
+                if not joined:
+                    try:
+                        await downloader.delete(path)
+                    except Exception:
+                        logger.debug(
+                            "Failed cleaning downloaded file after VC join failure.",
+                            exc_info=True,
+                        )
 
-        joined = False
+                    if processing:
+                        try:
+                            await processing.delete()
+                        except Exception:
+                            pass
 
-    if not joined:
+                    reason = "join_failed"
 
-        try:
-            await downloader.delete(path)
-        except Exception:
-            logger.debug(
-                "Failed cleaning downloaded file "
-                "after VC join failure.",
-                exc_info=True,
-            )
+                    try:
+                        from telegram.client import get_voice_music_services
 
-        if processing:
+                        receiver, _controller = get_voice_music_services()
+                        active = await receiver.has_active_call(chat_id)
 
-            try:
-                await processing.delete()
-            except Exception:
-                pass
+                        if not active:
+                            reason = "no_active_call"
 
-        await message.bot.send_message(
-            chat_id,
-            "❌ <b>Zara could not join the voice chat.</b>\n\n"
-            "Please make sure Zara is in the group, "
-            "is not banned, and a voice chat is active.",
-        )
+                    except Exception:
+                        logger.debug(
+                            "Could not determine VC join failure reason.",
+                            exc_info=True,
+                        )
 
-        return True
+                    if reason == "no_active_call":
+                        response = (
+                            "❌ <b>No active voice chat found.</b>\n\n"
+                            "Please start a voice chat first, then try playing "
+                            "the song again."
+                        )
+                    else:
+                        response = (
+                            "❌ <b>Zara could not join the voice chat.</b>\n\n"
+                            "Please make sure Zara is in the group, is not banned "
+                            "or restricted, and has permission to join the voice chat."
+                        )
 
-else:
+                    await message.bot.send_message(
+                        chat_id,
+                        response,
+                    )
+                    return True
 
-    try:
-        await downloader.delete(path)
-    except Exception:
-        pass
+            else:
+                try:
+                    await downloader.delete(path)
+                except Exception:
+                    pass
 
-    if processing:
+                if processing:
+                    try:
+                        await processing.delete()
+                    except Exception:
+                        pass
 
-        try:
-            await processing.delete()
-        except Exception:
-            pass
-
-    await message.bot.send_message(
-        chat_id,
-        "❌ <b>Zara voice chat system is unavailable.</b>",
-    )
-
-    return True
-            
+                await message.bot.send_message(
+                    chat_id,
+                    "❌ <b>Zara voice chat system is unavailable.</b>",
+                )
+                return True
 
             # ------------------------------------------------
             # ADD TO PLAYER
