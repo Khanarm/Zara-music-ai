@@ -1,4 +1,3 @@
-import inspect
 import logging
 from typing import Awaitable, Callable, Optional
 
@@ -12,15 +11,20 @@ TranscriptHandler = Callable[
 
 class VoiceChatReceiver:
     """
-    Safe Telegram VC receiver for the installed PyTgCalls version.
+    VC helper for PyTgCalls 2.3.3.
 
-    Responsibilities:
-        - Join an active Telegram voice chat.
-        - Leave a voice chat.
-        - Track joined chats.
-        - Register compatible PyTgCalls stream callbacks when available.
-        - NEVER assume that every PyTgCalls update has chat_id.
-        - Log the actual update structure for debugging.
+    IMPORTANT:
+        PyTgCalls 2.x joins the active group call as part of
+        play(chat_id, MediaStream(...)).
+
+        Therefore this class MUST NOT call:
+            play(chat_id, None)
+
+        This class only:
+            - checks whether an active VC exists
+            - tracks chats used by Zara
+            - registers incoming stream-frame updates
+            - provides leave/status/cleanup helpers
     """
 
     def __init__(
@@ -38,7 +42,6 @@ class VoiceChatReceiver:
         self._registered = False
         self._speech_capture_available = False
 
-        # Prevent log spam.
         self._update_types_logged: set[str] = set()
 
     # ========================================================
@@ -47,11 +50,7 @@ class VoiceChatReceiver:
 
     async def register(self) -> bool:
         """
-        Try to register the stream-frame API if the installed
-        PyTgCalls version exposes it.
-
-        This function does NOT assume the callback contains
-        chat_id or audio bytes.
+        Register PyTgCalls stream-frame callback when supported.
         """
 
         if self._registered:
@@ -67,19 +66,19 @@ class VoiceChatReceiver:
             )
             return False
 
-        stream_frame = getattr(
-            filters,
-            "stream_frame",
-            None,
-        )
-
-        if stream_frame is None:
-            logger.warning(
-                "PyTgCalls does not expose filters.stream_frame()."
-            )
-            return False
-
         try:
+            stream_frame = getattr(
+                filters,
+                "stream_frame",
+                None,
+            )
+
+            if stream_frame is None:
+                logger.warning(
+                    "PyTgCalls does not expose filters.stream_frame()."
+                )
+                return False
+
             filter_object = stream_frame()
 
             decorator = self.calls.on_update(
@@ -120,6 +119,106 @@ class VoiceChatReceiver:
             return False
 
     # ========================================================
+    # ACTIVE VC CHECK
+    # ========================================================
+
+    async def has_active_call(
+        self,
+        chat_id: int,
+    ) -> bool:
+        """
+        Check whether the group currently has an active
+        voice/video chat.
+
+        Does NOT create a call.
+        """
+
+        chat_id = int(chat_id)
+
+        try:
+            group_calls = getattr(
+                self.calls,
+                "group_calls",
+                None,
+            )
+
+            if group_calls is None:
+                logger.warning(
+                    "PyTgCalls group_calls API unavailable."
+                )
+                return False
+
+            if callable(group_calls):
+                result = group_calls()
+
+                if hasattr(result, "__await__"):
+                    result = await result
+
+                group_calls = result
+
+            try:
+                return chat_id in group_calls
+            except Exception:
+                pass
+
+        except Exception:
+            logger.debug(
+                "Could not inspect active group calls.",
+                exc_info=True,
+            )
+
+        return False
+
+    # ========================================================
+    # JOIN / PREPARE
+    # ========================================================
+
+    async def join(
+        self,
+        chat_id: int,
+    ) -> bool:
+        """
+        Prepare Zara for playback.
+
+        NOTE:
+        PyTgCalls 2.3.3 performs the actual VC connection when
+        play(chat_id, MediaStream(...)) is called.
+
+        Therefore this method only verifies that an active VC
+        exists and marks the chat as ready.
+        """
+
+        chat_id = int(chat_id)
+
+        if chat_id in self.joined_chats:
+            return True
+
+        active = await self.has_active_call(
+            chat_id
+        )
+
+        if not active:
+            logger.warning(
+                "No active VC found for %s.",
+                chat_id,
+            )
+            return False
+
+        self.joined_chats.add(
+            chat_id
+        )
+
+        if not self._registered:
+            await self.register()
+
+        logger.info(
+            "VC ready for Zara playback: %s",
+            chat_id,
+        )
+
+        return True
+
+    # ========================================================
     # UPDATE DEBUG
     # ========================================================
 
@@ -127,11 +226,6 @@ class VoiceChatReceiver:
         self,
         update,
     ) -> None:
-        """
-        Log the real structure of the PyTgCalls update.
-
-        This intentionally avoids assuming chat_id exists.
-        """
 
         update_type = type(update).__name__
 
@@ -146,16 +240,19 @@ class VoiceChatReceiver:
             attributes = {}
 
             for name in dir(update):
+
                 if name.startswith("_"):
                     continue
 
                 try:
-                    value = getattr(update, name)
+                    value = getattr(
+                        update,
+                        name,
+                    )
 
                     if callable(value):
                         continue
 
-                    # Avoid dumping huge byte buffers.
                     if isinstance(value, bytes):
                         attributes[name] = (
                             f"<bytes:{len(value)}>"
@@ -164,7 +261,10 @@ class VoiceChatReceiver:
                         text = repr(value)
 
                         if len(text) > 300:
-                            text = text[:300] + "..."
+                            text = (
+                                text[:300]
+                                + "..."
+                            )
 
                         attributes[name] = text
 
@@ -183,19 +283,14 @@ class VoiceChatReceiver:
             )
 
     # ========================================================
-    # GET CHAT ID
+    # CHAT ID
     # ========================================================
 
     def _extract_chat_id(
         self,
         update,
     ) -> Optional[int]:
-        """
-        Safely extract chat ID from different possible
-        PyTgCalls update objects.
-        """
 
-        # Direct chat_id.
         value = getattr(
             update,
             "chat_id",
@@ -208,7 +303,6 @@ class VoiceChatReceiver:
             except Exception:
                 pass
 
-        # Some update objects may expose group_call.
         group_call = getattr(
             update,
             "group_call",
@@ -216,6 +310,7 @@ class VoiceChatReceiver:
         )
 
         if group_call is not None:
+
             value = getattr(
                 group_call,
                 "chat_id",
@@ -228,7 +323,6 @@ class VoiceChatReceiver:
                 except Exception:
                     pass
 
-        # Some objects may expose chat.
         chat = getattr(
             update,
             "chat",
@@ -236,6 +330,7 @@ class VoiceChatReceiver:
         )
 
         if chat is not None:
+
             value = getattr(
                 chat,
                 "id",
@@ -251,19 +346,13 @@ class VoiceChatReceiver:
         return None
 
     # ========================================================
-    # EXTRACT AUDIO
+    # AUDIO DATA
     # ========================================================
 
     def _extract_audio_bytes(
         self,
         update,
     ) -> Optional[bytes]:
-        """
-        Try common attribute names for incoming PCM/audio data.
-
-        We deliberately do NOT pretend an arbitrary field is
-        audio unless it is actually bytes-like.
-        """
 
         possible_names = (
             "frame",
@@ -304,21 +393,16 @@ class VoiceChatReceiver:
         return None
 
     # ========================================================
-    # HANDLE STREAM FRAME
+    # FRAME HANDLER
     # ========================================================
 
     async def _handle_stream_frame(
         self,
         update,
     ) -> None:
-        """
-        Handle an incoming PyTgCalls update safely.
-
-        At this stage we only accept a real bytes-like audio
-        payload. No fake transcription is generated.
-        """
 
         try:
+
             self._log_update_structure(
                 update
             )
@@ -328,125 +412,29 @@ class VoiceChatReceiver:
             )
 
             if chat_id is None:
-                logger.debug(
-                    "PyTgCalls update has no resolvable chat ID: %s",
-                    type(update).__name__,
-                )
                 return
 
             audio_data = self._extract_audio_bytes(
                 update
             )
 
-            if audio_data is None:
-                logger.debug(
-                    "No audio bytes found in PyTgCalls update for %s.",
-                    chat_id,
-                )
-                return
-
             if not audio_data:
                 return
 
             logger.debug(
-                "Received VC audio data: chat=%s bytes=%s",
+                "Received VC audio frame: chat=%s bytes=%s",
                 chat_id,
                 len(audio_data),
             )
 
-            # IMPORTANT:
-            #
-            # Do not send arbitrary raw frames directly to Gemini.
-            # A proper buffering/segmentation layer is required.
-            #
-            # The actual PCM stream format exposed by the installed
-            # PyTgCalls build must first be confirmed.
-            #
-            # Therefore this receiver currently only verifies that
-            # audio bytes are actually arriving.
+            # STT buffering can be connected here later.
+            # Never send arbitrary individual frames
+            # directly to Gemini.
 
         except Exception:
             logger.exception(
                 "Failed to process PyTgCalls stream frame."
             )
-
-    # ========================================================
-    # JOIN
-    # ========================================================
-
-    async def join(
-        self,
-        chat_id: int,
-    ) -> bool:
-
-        chat_id = int(chat_id)
-
-        if chat_id in self.joined_chats:
-            logger.info(
-                "VC receiver already joined for %s",
-                chat_id,
-            )
-            return True
-
-        try:
-            play = getattr(
-                self.calls,
-                "play",
-                None,
-            )
-
-            if play is None:
-                raise RuntimeError(
-                    "Installed PyTgCalls does not expose play()."
-                )
-
-            result = play(
-                chat_id,
-                None,
-            )
-
-            if inspect.isawaitable(result):
-                await result
-
-            self.joined_chats.add(
-                chat_id
-            )
-
-            logger.info(
-                "VC receiver joined successfully for %s",
-                chat_id,
-            )
-
-            if not self._registered:
-                await self.register()
-
-            if self._speech_capture_available:
-                logger.info(
-                    "VC speech capture enabled for %s",
-                    chat_id,
-                )
-            else:
-                logger.warning(
-                    "VC joined, but compatible speech-frame "
-                    "capture is unavailable for %s.",
-                    chat_id,
-                )
-
-            return True
-
-        except Exception as exc:
-
-            logger.exception(
-                "VC join failed for %s: %s",
-                chat_id,
-                exc,
-            )
-
-            self.joined_chats.discard(
-                chat_id
-            )
-
-            return False
 
     # ========================================================
     # LEAVE
@@ -460,6 +448,7 @@ class VoiceChatReceiver:
         chat_id = int(chat_id)
 
         try:
+
             leave_call = getattr(
                 self.calls,
                 "leave_call",
@@ -468,32 +457,24 @@ class VoiceChatReceiver:
 
             if leave_call is None:
                 raise RuntimeError(
-                    "Installed PyTgCalls does not expose leave_call()."
+                    "PyTgCalls leave_call() unavailable."
                 )
 
             result = leave_call(
                 chat_id
             )
 
-            if inspect.isawaitable(result):
+            if hasattr(result, "__await__"):
                 await result
 
-            self.joined_chats.discard(
-                chat_id
-            )
-
             logger.info(
-                "VC speech receiver stopped for chat %s",
+                "Zara left VC: %s",
                 chat_id,
             )
 
             return True
 
         except Exception as exc:
-
-            self.joined_chats.discard(
-                chat_id
-            )
 
             logger.warning(
                 "VC leave failed for %s: %s",
@@ -503,6 +484,11 @@ class VoiceChatReceiver:
 
             return False
 
+        finally:
+            self.joined_chats.discard(
+                chat_id
+            )
+
     # ========================================================
     # STATUS
     # ========================================================
@@ -511,6 +497,7 @@ class VoiceChatReceiver:
         self,
         chat_id: int,
     ) -> bool:
+
         return int(chat_id) in self.joined_chats
 
     # ========================================================
@@ -568,4 +555,4 @@ class VoiceChatReceiver:
 __all__ = [
     "VoiceChatReceiver",
     "TranscriptHandler",
-        ]
+]
