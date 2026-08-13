@@ -51,6 +51,199 @@ router = Router()
 
 
 # ============================================================
+# ZARA USERBOT GROUP ACCESS
+# ============================================================
+
+async def ensure_zara_in_group(
+    message: Message,
+) -> bool:
+    """
+    Make sure Zara Userbot can access the group.
+
+    Returns:
+        True  -> Zara can join/use the group.
+        False -> Zara cannot access the group.
+    """
+
+    if not message.chat:
+        return False
+
+    chat_id = int(message.chat.id)
+
+    try:
+        from telegram.client import get_user_client
+
+        user_client = get_user_client()
+
+        # ----------------------------------------------------
+        # Get Zara Userbot identity
+        # ----------------------------------------------------
+
+        zara = await user_client.get_me()
+
+        if not zara:
+            logger.error(
+                "Could not get Zara Userbot identity."
+            )
+            return False
+
+        zara_id = int(zara.id)
+
+        # ----------------------------------------------------
+        # Check Zara membership using Manager Bot
+        # ----------------------------------------------------
+
+        try:
+
+            member = await message.bot.get_chat_member(
+                chat_id,
+                zara_id,
+            )
+
+            status = str(
+                member.status
+            ).lower()
+
+            # Zara is banned.
+            if status in {
+                "kicked",
+                "banned",
+            }:
+
+                await message.bot.send_message(
+                    chat_id,
+                    "❌ Zara is banned from this group.\n\n"
+                    "Please unban Zara Userbot first, then try "
+                    "/play again.",
+                )
+
+                logger.warning(
+                    "Zara Userbot is banned from group %s",
+                    chat_id,
+                )
+
+                return False
+
+            # Zara is already inside.
+            if status in {
+                "member",
+                "administrator",
+                "creator",
+                "owner",
+            }:
+
+                logger.info(
+                    "Zara Userbot is already in group %s",
+                    chat_id,
+                )
+
+                return True
+
+        except Exception:
+
+            logger.debug(
+                "Manager bot could not check Zara membership.",
+                exc_info=True,
+            )
+
+        # ----------------------------------------------------
+        # Zara is not currently inside.
+        #
+        # Create invite link using Manager Bot.
+        # ----------------------------------------------------
+
+        try:
+
+            invite = await message.bot.create_chat_invite_link(
+                chat_id=chat_id,
+                name="Zara Userbot",
+                creates_join_request=False,
+            )
+
+            invite_link = invite.invite_link
+
+        except Exception:
+
+            logger.exception(
+                "Could not create invite link for Zara."
+            )
+
+            await message.bot.send_message(
+                chat_id,
+                "❌ Zara is not in this group.\n\n"
+                "Please add Zara Userbot to this group "
+                "and give it permission to join the voice chat.",
+            )
+
+            return False
+
+        # ----------------------------------------------------
+        # Userbot joins using invite link.
+        # ----------------------------------------------------
+
+        try:
+
+            from telethon.tl.functions.messages import (
+                ImportChatInviteRequest,
+            )
+
+            # Extract invite hash.
+            if "/+" in invite_link:
+
+                invite_hash = invite_link.split(
+                    "/+",
+                    1,
+                )[1]
+
+            else:
+
+                invite_hash = invite_link.rsplit(
+                    "/",
+                    1,
+                )[-1]
+
+            if not invite_hash:
+
+                raise RuntimeError(
+                    "Invalid Telegram invite link."
+                )
+
+            await user_client(
+                ImportChatInviteRequest(
+                    invite_hash
+                )
+            )
+
+            logger.info(
+                "Zara Userbot joined group %s using invite link.",
+                chat_id,
+            )
+
+            return True
+
+        except Exception as exc:
+
+            logger.warning(
+                "Zara Userbot could not join group %s: %s",
+                chat_id,
+                exc,
+                exc_info=True,
+            )
+
+            # ------------------------------------------------
+            # Final English instruction.
+            # ------------------------------------------------
+
+            await message.bot.send_message(
+                chat_id,
+                "❌ Zara could not join this group.\n\n"
+                "Please add Zara Userbot to the group manually "
+                "and make sure it is not banned or restricted.",
+            )
+
+            return False
+
+# ============================================================
 # USER HELPERS
 # ============================================================
 
@@ -357,122 +550,367 @@ async def handle_music_intent(
         except Exception:
             processing = None
 
+
         # ====================================================
         # PLAY / SEARCH / VIDEO
         # ====================================================
-        if intent in {MUSIC_SEARCH, MUSIC_PLAY, MUSIC_VIDEO}:
+
+        if intent in {
+            MUSIC_SEARCH,
+            MUSIC_PLAY,
+            MUSIC_VIDEO,
+        }:
+
             query = text
 
             prefixes = (
-                "search song", "song search", "gana search", "gaana search",
-                "music search", "find song", "find music", "search music",
-                "play song", "play music", "play", "chalao", "chala",
-                "bajao", "baja do", "song chala", "gana chala",
-                "gaana chala", "video chalao", "video bajao", "video play",
+                "search song",
+                "song search",
+                "gana search",
+                "gaana search",
+                "music search",
+                "find song",
+                "find music",
+                "search music",
+                "play song",
+                "play music",
+                "play",
+                "chalao",
+                "chala",
+                "bajao",
+                "baja do",
+                "song chala",
+                "gana chala",
+                "gaana chala",
+                "video chalao",
+                "video bajao",
+                "video play",
                 "video dikhao",
             )
 
             lowered = query.lower()
+
             for prefix in prefixes:
+
                 if lowered.startswith(prefix):
-                    query = query[len(prefix):].strip(" :-")
+
+                    query = query[
+                        len(prefix):
+                    ].strip(" :-")
+
                     break
 
+            # ------------------------------------------------
+            # PLAY CURRENT
+            # ------------------------------------------------
+
             if not query:
-                current = player.current(chat_id)
-                if current and intent == MUSIC_PLAY:
-                    ok = await player.play_current(chat_id)
+
+                current = player.current(
+                    chat_id
+                )
+
+                if (
+                    current
+                    and intent == MUSIC_PLAY
+                ):
+
+                    # Make sure Zara can access group.
+                    zara_ready = (
+                        await ensure_zara_in_group(
+                            message
+                        )
+                    )
+
+                    if not zara_ready:
+
+                        if processing:
+
+                            try:
+                                await processing.delete()
+                            except Exception:
+                                pass
+
+                        return True
+
+                    ok = await player.play_current(
+                        chat_id
+                    )
+
                     if processing:
-                        try: await processing.delete()
-                        except Exception: pass
+
+                        try:
+                            await processing.delete()
+                        except Exception:
+                            pass
+
                     await message.bot.send_message(
                         chat_id,
-                        "▶️ Playing current song." if ok else "❌ Could not start playback.",
+                        (
+                            "▶️ Playing current song."
+                            if ok
+                            else
+                            "❌ Could not start playback."
+                        ),
                     )
+
                     return True
 
                 if processing:
-                    try: await processing.delete()
-                    except Exception: pass
-                await message.bot.send_message(chat_id, "🎵 Song ka naam batao.")
+
+                    try:
+                        await processing.delete()
+                    except Exception:
+                        pass
+
+                await message.bot.send_message(
+                    chat_id,
+                    "🎵 Song ka naam batao.",
+                )
+
                 return True
 
+            # ------------------------------------------------
+            # QUEUE LIMIT
+            # ------------------------------------------------
+
             try:
-                max_queue = int(MUSIC_MAX_QUEUE)
+
+                max_queue = int(
+                    MUSIC_MAX_QUEUE
+                )
+
             except Exception:
+
                 max_queue = 10
 
-            # Start VC join and YouTube search at the same time.
+            if (
+                player.queue_size(
+                    chat_id
+                ) >= max_queue
+            ):
+
+                if processing:
+
+                    try:
+                        await processing.delete()
+                    except Exception:
+                        pass
+
+                await message.bot.send_message(
+                    chat_id,
+                    "⚠️ Music queue is full.",
+                )
+
+                return True
+
+            # ------------------------------------------------
+            # MAKE SURE ZARA IS IN GROUP
+            # ------------------------------------------------
+
+            zara_ready = (
+                await ensure_zara_in_group(
+                    message
+                )
+            )
+
+            if not zara_ready:
+
+                if processing:
+
+                    try:
+                        await processing.delete()
+                    except Exception:
+                        pass
+
+                return True
+
+            # ------------------------------------------------
+            # VC JOIN + SEARCH PARALLEL
+            # ------------------------------------------------
+
             join_task = None
-            try:
-                from telegram.client import get_voice_music_services
-                receiver, _controller = get_voice_music_services()
-                join_task = asyncio.create_task(receiver.join(chat_id))
-            except Exception:
-                logger.debug("VC join task could not be started.", exc_info=True)
-
-            if player.queue_size(chat_id) >= max_queue:
-                if join_task:
-                    join_task.cancel()
-                if processing:
-                    try: await processing.delete()
-                    except Exception: pass
-                await message.bot.send_message(chat_id, "⚠️ Queue full hai.")
-                return True
 
             try:
-                result = await searcher.first(query)
+
+                from telegram.client import (
+                    get_voice_music_services,
+                )
+
+                receiver, _controller = (
+                    get_voice_music_services()
+                )
+
+                join_task = asyncio.create_task(
+                    receiver.join(
+                        chat_id
+                    )
+                )
+
             except Exception:
-                logger.exception("Music search failed: %s", query)
+
+                logger.debug(
+                    "VC join task could not be started.",
+                    exc_info=True,
+                )
+
+            # ------------------------------------------------
+            # SEARCH
+            # ------------------------------------------------
+
+            try:
+
+                result = await searcher.first(
+                    query
+                )
+
+            except Exception:
+
+                logger.exception(
+                    "Music search failed: %s",
+                    query,
+                )
+
                 if join_task:
+
                     join_task.cancel()
+
                 if processing:
-                    try: await processing.delete()
-                    except Exception: pass
-                await message.bot.send_message(chat_id, "❌ Song search me error aa gaya.")
+
+                    try:
+                        await processing.delete()
+                    except Exception:
+                        pass
+
+                await message.bot.send_message(
+                    chat_id,
+                    "❌ Song search me error aa gaya.",
+                )
+
                 return True
+
+            # ------------------------------------------------
+            # SEARCH RESULT NOT FOUND
+            # ------------------------------------------------
 
             if not result:
+
                 if join_task:
+
                     join_task.cancel()
+
                 if processing:
-                    try: await processing.delete()
-                    except Exception: pass
-                await message.bot.send_message(chat_id, f"❌ <b>{query}</b> nahi mila.")
+
+                    try:
+                        await processing.delete()
+                    except Exception:
+                        pass
+
+                await message.bot.send_message(
+                    chat_id,
+                    f"❌ <b>{query}</b> nahi mila.",
+                )
+
                 return True
 
-            is_video = intent == MUSIC_VIDEO
+            # ------------------------------------------------
+            # DOWNLOAD
+            # ------------------------------------------------
+
+            is_video = (
+                intent == MUSIC_VIDEO
+            )
 
             try:
+
                 if is_video:
+
                     try:
-                        path = await downloader.download(result, video=True)
+
+                        path = await downloader.download(
+                            result,
+                            video=True,
+                        )
+
                     except TypeError:
-                        path = await downloader.download(result)
+
+                        path = await downloader.download(
+                            result
+                        )
+
                 else:
-                    path = await downloader.download(result)
+
+                    path = await downloader.download(
+                        result
+                    )
+
             except Exception:
-                logger.exception("Music download failed: %s", result.title)
+
+                logger.exception(
+                    "Music download failed: %s",
+                    result.title,
+                )
+
                 if join_task:
+
                     join_task.cancel()
+
                 if processing:
-                    try: await processing.delete()
-                    except Exception: pass
-                await message.bot.send_message(chat_id, "❌ Song download nahi ho paya.")
+
+                    try:
+                        await processing.delete()
+                    except Exception:
+                        pass
+
+                await message.bot.send_message(
+                    chat_id,
+                    "❌ Song download nahi ho paya.",
+                )
+
                 return True
+
+            # ------------------------------------------------
+            # DOWNLOAD FAILED
+            # ------------------------------------------------
 
             if not path:
+
                 if join_task:
+
                     join_task.cancel()
+
                 if processing:
-                    try: await processing.delete()
-                    except Exception: pass
-                await message.bot.send_message(chat_id, "❌ Song/media download nahi ho paya.")
+
+                    try:
+                        await processing.delete()
+                    except Exception:
+                        pass
+
+                await message.bot.send_message(
+                    chat_id,
+                    "❌ Song/media download nahi ho paya.",
+                )
+
                 return True
 
+            # ------------------------------------------------
+            # CREATE TRACK
+            # ------------------------------------------------
+
             from music.queue import Track
-            metadata = dict(getattr(result, "metadata", {}) or {})
-            metadata["telegram_message"] = None
+
+            metadata = dict(
+                getattr(
+                    result,
+                    "metadata",
+                    {},
+                )
+                or {}
+            )
+
+            metadata[
+                "telegram_message"
+            ] = None
 
             track = Track(
                 title=result.title,
@@ -481,79 +919,200 @@ async def handle_music_intent(
                 audio_path=path,
                 duration=result.duration,
                 requested_by=user_id,
-                requested_by_name=message.from_user.full_name,
-                thumbnail=getattr(result, "thumbnail", None),
-                source=getattr(result, "source", None),
-                media_type="video" if is_video else "audio",
+                requested_by_name=(
+                    message.from_user.full_name
+                ),
+                thumbnail=getattr(
+                    result,
+                    "thumbnail",
+                    None,
+                ),
+                source=getattr(
+                    result,
+                    "source",
+                    None,
+                ),
+                media_type=(
+                    "video"
+                    if is_video
+                    else "audio"
+                ),
                 metadata=metadata,
             )
 
-            # Wait only for the VC join after search/download work is ready.
+            # ------------------------------------------------
+            # WAIT FOR VC JOIN
+            # ------------------------------------------------
+
             if join_task:
+
                 try:
+
                     joined = await join_task
+
                 except Exception:
+
+                    logger.exception(
+                        "VC join failed."
+                    )
+
                     joined = False
+
                 if not joined:
+
                     try:
-                        await downloader.delete(path)
+
+                        await downloader.delete(
+                            path
+                        )
+
                     except Exception:
-                        logger.debug("Failed to cleanup downloaded file after VC join failure.", exc_info=True)
+
+                        logger.debug(
+                            "Failed cleaning downloaded "
+                            "file after VC join failure.",
+                            exc_info=True,
+                        )
+
                     if processing:
-                        try: await processing.delete()
-                        except Exception: pass
+
+                        try:
+                            await processing.delete()
+                        except Exception:
+                            pass
+
                     await message.bot.send_message(
                         chat_id,
-                        "❌ Zara VC me join nahi kar paayi.",
+                        "❌ Zara could not join the voice chat.",
                     )
+
                     return True
 
-            was_playing = player.is_playing(chat_id)
+            else:
+
+                # No receiver available.
+                try:
+
+                    await downloader.delete(
+                        path
+                    )
+
+                except Exception:
+
+                    pass
+
+                if processing:
+
+                    try:
+                        await processing.delete()
+                    except Exception:
+                        pass
+
+                await message.bot.send_message(
+                    chat_id,
+                    "❌ Zara voice chat system is unavailable.",
+                )
+
+                return True
+
+            # ------------------------------------------------
+            # ADD TO PLAYER
+            # ------------------------------------------------
+
+            was_playing = (
+                player.is_playing(
+                    chat_id
+                )
+            )
+
             position = await player.add(
                 chat_id,
                 track,
                 play_now=not was_playing,
             )
 
-            if not was_playing and (
-                player.current(chat_id) is None
-                or not player.is_playing(chat_id)
+            # ------------------------------------------------
+            # PLAYBACK FAILURE
+            # ------------------------------------------------
+
+            if (
+                not was_playing
+                and (
+                    player.current(chat_id)
+                    is None
+                    or not player.is_playing(
+                        chat_id
+                    )
+                )
             ):
+
                 if processing:
-                    try: await processing.delete()
-                    except Exception: pass
+
+                    try:
+                        await processing.delete()
+                    except Exception:
+                        pass
+
                 try:
-                    await downloader.delete(path)
+
+                    await downloader.delete(
+                        path
+                    )
+
                 except Exception:
-                    logger.debug("Failed to cleanup downloaded file after playback failure.", exc_info=True)
+
+                    logger.debug(
+                        "Failed cleaning media "
+                        "after playback failure.",
+                        exc_info=True,
+                    )
+
                 await message.bot.send_message(
                     chat_id,
                     "❌ Song ready tha, lekin VC playback start nahi hua.",
                 )
+
                 return True
 
+            # ------------------------------------------------
+            # REMOVE PROCESSING
+            # ------------------------------------------------
+
             if processing:
-                try: await processing.delete()
-                except Exception: pass
+
+                try:
+                    await processing.delete()
+                except Exception:
+                    pass
+
+            # ------------------------------------------------
+            # RESPONSE
+            # ------------------------------------------------
 
             if was_playing:
+
                 await message.bot.send_message(
                     chat_id,
                     f"🎵 <b>{result.title}</b>\n"
                     f"🎵 Play by Zara Music\n"
-                    f"👤 Requested by: <b>{message.from_user.full_name}</b>\n"
-                    f"⏭️ Queue position: <b>{position}</b>",
+                    f"👤 Requested by: "
+                    f"<b>{message.from_user.full_name}</b>\n"
+                    f"⏭️ Queue position: "
+                    f"<b>{position}</b>",
                 )
+
             else:
+
                 await message.bot.send_message(
                     chat_id,
                     f"🎵 <b>{result.title}</b>\n"
                     f"🎵 Play by Zara Music\n"
-                    f"👤 Requested by: <b>{message.from_user.full_name}</b>",
+                    f"👤 Requested by: "
+                    f"<b>{message.from_user.full_name}</b>",
                 )
 
-            return True
-
+            return True        
+        
         # ====================================================
         # PAUSE / RESUME
         # ====================================================
