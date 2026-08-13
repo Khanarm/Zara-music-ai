@@ -1,7 +1,10 @@
+# voice/vc_receiver.py
+
 import logging
 from typing import Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
+
 
 TranscriptHandler = Callable[
     [int, str],
@@ -11,20 +14,22 @@ TranscriptHandler = Callable[
 
 class VoiceChatReceiver:
     """
-    VC helper for PyTgCalls 2.3.3.
+    Zara Voice Chat receiver/helper.
 
-    IMPORTANT:
-        PyTgCalls 2.x joins the active group call as part of
-        play(chat_id, MediaStream(...)).
+    PyTgCalls 2.3.3:
+        - Active VC is checked through Telethon.
+        - Actual PyTgCalls connection happens when
+          AudioStream.play() starts playback.
+        - This class does NOT call play(chat_id, None).
 
-        Therefore this class MUST NOT call:
-            play(chat_id, None)
-
-        This class only:
-            - checks whether an active VC exists
-            - tracks chats used by Zara
-            - registers incoming stream-frame updates
-            - provides leave/status/cleanup helpers
+    Responsibilities:
+        - Check whether Zara userbot is inside the group.
+        - Detect if Zara is banned.
+        - Detect whether an active Telegram VC exists.
+        - Prepare chat for PyTgCalls playback.
+        - Register stream-frame callbacks when available.
+        - Leave VC.
+        - Cleanup.
     """
 
     def __init__(
@@ -33,6 +38,7 @@ class VoiceChatReceiver:
         user_client=None,
         on_transcript: Optional[TranscriptHandler] = None,
     ) -> None:
+
         self.calls = calls
         self.user_client = user_client
         self.on_transcript = on_transcript
@@ -43,6 +49,62 @@ class VoiceChatReceiver:
         self._speech_capture_available = False
 
         self._update_types_logged: set[str] = set()
+
+        # Last join failure reason.
+        #
+        # Possible values:
+        #   None
+        #   "not_in_group"
+        #   "banned"
+        #   "no_active_call"
+        #   "permission_denied"
+        #   "not_authorized"
+        #   "unavailable"
+        #   "join_failed"
+        #
+        self.last_join_error: dict[
+            int,
+            str,
+        ] = {}
+
+    # ========================================================
+    # ERROR STATE
+    # ========================================================
+
+    def _set_join_error(
+        self,
+        chat_id: int,
+        reason: str,
+    ) -> None:
+
+        self.last_join_error[
+            int(chat_id)
+        ] = reason
+
+        logger.warning(
+            "VC join error: chat=%s reason=%s",
+            chat_id,
+            reason,
+        )
+
+    def get_join_error(
+        self,
+        chat_id: int,
+    ) -> Optional[str]:
+
+        return self.last_join_error.get(
+            int(chat_id)
+        )
+
+    def clear_join_error(
+        self,
+        chat_id: int,
+    ) -> None:
+
+        self.last_join_error.pop(
+            int(chat_id),
+            None,
+        )
 
     # ========================================================
     # REGISTER
@@ -59,14 +121,19 @@ class VoiceChatReceiver:
         self._registered = True
 
         try:
+
             from pytgcalls import filters
+
         except Exception:
+
             logger.warning(
                 "PyTgCalls filters API unavailable."
             )
+
             return False
 
         try:
+
             stream_frame = getattr(
                 filters,
                 "stream_frame",
@@ -74,9 +141,12 @@ class VoiceChatReceiver:
             )
 
             if stream_frame is None:
+
                 logger.warning(
-                    "PyTgCalls does not expose filters.stream_frame()."
+                    "PyTgCalls does not expose "
+                    "filters.stream_frame()."
                 )
+
                 return False
 
             filter_object = stream_frame()
@@ -86,20 +156,26 @@ class VoiceChatReceiver:
             )
 
             if decorator is None:
+
                 logger.warning(
-                    "PyTgCalls on_update() returned no decorator."
+                    "PyTgCalls on_update() returned "
+                    "no decorator."
                 )
+
                 return False
 
             async def frame_handler(
                 client,
                 update,
             ):
+
                 await self._handle_stream_frame(
                     update
                 )
 
-            decorator(frame_handler)
+            decorator(
+                frame_handler
+            )
 
             self._speech_capture_available = True
 
@@ -110,16 +186,175 @@ class VoiceChatReceiver:
             return True
 
         except Exception:
+
             logger.warning(
-                "PyTgCalls stream-frame registration failed.",
+                "PyTgCalls stream-frame registration "
+                "failed.",
                 exc_info=True,
             )
 
             self._speech_capture_available = False
+
             return False
 
     # ========================================================
-    # ACTIVE VC CHECK
+    # TELETHON GROUP ACCESS
+    # ========================================================
+
+    async def _get_self_entity(
+        self,
+    ):
+        """
+        Return the logged-in Zara Telethon account.
+        """
+
+        if self.user_client is None:
+            return None
+
+        try:
+
+            return await self.user_client.get_me()
+
+        except Exception:
+
+            logger.exception(
+                "Could not get Zara Telethon account."
+            )
+
+            return None
+
+    async def _check_group_membership(
+        self,
+        chat_id: int,
+    ) -> str:
+        """
+        Check Zara's membership/access.
+
+        Returns:
+            "ok"
+            "not_in_group"
+            "banned"
+            "permission_denied"
+            "not_authorized"
+            "unavailable"
+        """
+
+        if self.user_client is None:
+
+            self._set_join_error(
+                chat_id,
+                "unavailable",
+            )
+
+            return "unavailable"
+
+        try:
+
+            if not self.user_client.is_connected():
+
+                self._set_join_error(
+                    chat_id,
+                    "unavailable",
+                )
+
+                return "unavailable"
+
+            if not await self.user_client.is_user_authorized():
+
+                self._set_join_error(
+                    chat_id,
+                    "not_authorized",
+                )
+
+                return "not_authorized"
+
+        except Exception:
+
+            logger.exception(
+                "Could not check Telethon authorization."
+            )
+
+            self._set_join_error(
+                chat_id,
+                "unavailable",
+            )
+
+            return "unavailable"
+
+        me = await self._get_self_entity()
+
+        if me is None:
+
+            self._set_join_error(
+                chat_id,
+                "unavailable",
+            )
+
+            return "unavailable"
+
+        try:
+
+            permissions = (
+                await self.user_client.get_permissions(
+                    chat_id,
+                    me,
+                )
+            )
+
+            # Telethon permission objects expose
+            # is_banned for restricted/banned users.
+            if getattr(
+                permissions,
+                "is_banned",
+                False,
+            ):
+
+                self._set_join_error(
+                    chat_id,
+                    "banned",
+                )
+
+                return "banned"
+
+            return "ok"
+
+        except Exception as exc:
+
+            error_name = type(exc).__name__
+
+            logger.warning(
+                "Could not get Zara group permissions: "
+                "chat=%s error=%s",
+                chat_id,
+                error_name,
+            )
+
+            # These errors generally mean the account
+            # is not currently a participant.
+            if error_name in {
+                "UserNotParticipantError",
+                "ChannelPrivateError",
+                "ChatAdminRequiredError",
+                "ChannelInvalidError",
+                "PeerIdInvalidError",
+            }:
+
+                self._set_join_error(
+                    chat_id,
+                    "not_in_group",
+                )
+
+                return "not_in_group"
+
+            self._set_join_error(
+                chat_id,
+                "permission_denied",
+            )
+
+            return "permission_denied"
+
+    # ========================================================
+    # ACTIVE VC CHECK THROUGH TELETHON
     # ========================================================
 
     async def has_active_call(
@@ -127,43 +362,109 @@ class VoiceChatReceiver:
         chat_id: int,
     ) -> bool:
         """
-        Check whether the group currently has an active
-        voice/video chat.
+        Reliably check active Telegram Voice Chat
+        through Telethon.
 
-        Does NOT create a call.
+        This does NOT join the call.
         """
 
         chat_id = int(chat_id)
 
+        if self.user_client is None:
+
+            logger.warning(
+                "Telethon client unavailable "
+                "while checking active VC: %s",
+                chat_id,
+            )
+
+            return False
+
         try:
-            group_calls = getattr(
-                self.calls,
-                "group_calls",
+
+            entity = await self.user_client.get_entity(
+                chat_id
+            )
+
+            # ------------------------------------------------
+            # SUPERGROUP / CHANNEL
+            # ------------------------------------------------
+
+            if getattr(
+                entity,
+                "broadcast",
+                False,
+            ) or getattr(
+                entity,
+                "megagroup",
+                False,
+            ):
+
+                from telethon.tl.functions.channels import (
+                    GetFullChannelRequest,
+                )
+
+                full = (
+                    await self.user_client(
+                        GetFullChannelRequest(
+                            entity
+                        )
+                    )
+                )
+
+                call = getattr(
+                    full.full_chat,
+                    "call",
+                    None,
+                )
+
+                if call is not None:
+
+                    logger.debug(
+                        "Active VC found: %s",
+                        chat_id,
+                    )
+
+                    return True
+
+                return False
+
+            # ------------------------------------------------
+            # NORMAL BASIC GROUP
+            # ------------------------------------------------
+
+            from telethon.tl.functions.messages import (
+                GetFullChatRequest,
+            )
+
+            full = (
+                await self.user_client(
+                    GetFullChatRequest(
+                        entity.id
+                    )
+                )
+            )
+
+            call = getattr(
+                full.full_chat,
+                "call",
                 None,
             )
 
-            if group_calls is None:
-                logger.warning(
-                    "PyTgCalls group_calls API unavailable."
+            if call is not None:
+
+                logger.debug(
+                    "Active VC found: %s",
+                    chat_id,
                 )
-                return False
 
-            if callable(group_calls):
-                result = group_calls()
-
-                if hasattr(result, "__await__"):
-                    result = await result
-
-                group_calls = result
-
-            try:
-                return chat_id in group_calls
-            except Exception:
-                pass
+                return True
 
         except Exception:
+
             logger.debug(
-                "Could not inspect active group calls.",
+                "Telethon active VC check failed: %s",
+                chat_id,
                 exc_info=True,
             )
 
@@ -178,38 +479,111 @@ class VoiceChatReceiver:
         chat_id: int,
     ) -> bool:
         """
-        Prepare Zara for playback.
+        Prepare Zara for music playback.
 
-        NOTE:
-        PyTgCalls 2.3.3 performs the actual VC connection when
-        play(chat_id, MediaStream(...)) is called.
+        IMPORTANT:
 
-        Therefore this method only verifies that an active VC
-        exists and marks the chat as ready.
+        This method does not call PyTgCalls.play().
+
+        AudioStream.play() will establish the actual
+        PyTgCalls connection.
+
+        Before that we verify:
+
+            1. Telethon is available.
+            2. Zara is authorized.
+            3. Zara is inside the group.
+            4. Zara is not banned.
+            5. Active VC exists.
         """
 
         chat_id = int(chat_id)
 
+        self.clear_join_error(
+            chat_id
+        )
+
+        # Already prepared.
         if chat_id in self.joined_chats:
-            return True
+
+            # Still verify that an active call exists.
+            active = await self.has_active_call(
+                chat_id
+            )
+
+            if active:
+                return True
+
+            # Old state is stale.
+            self.joined_chats.discard(
+                chat_id
+            )
+
+        # ----------------------------------------------------
+        # GROUP MEMBERSHIP
+        # ----------------------------------------------------
+
+        membership = (
+            await self._check_group_membership(
+                chat_id
+            )
+        )
+
+        if membership != "ok":
+
+            if membership == "banned":
+
+                logger.warning(
+                    "Zara is banned in group: %s",
+                    chat_id,
+                )
+
+            elif membership == "not_in_group":
+
+                logger.warning(
+                    "Zara is not a member of group: %s",
+                    chat_id,
+                )
+
+            return False
+
+        # ----------------------------------------------------
+        # ACTIVE VOICE CHAT
+        # ----------------------------------------------------
 
         active = await self.has_active_call(
             chat_id
         )
 
         if not active:
+
+            self._set_join_error(
+                chat_id,
+                "no_active_call",
+            )
+
             logger.warning(
                 "No active VC found for %s.",
                 chat_id,
             )
+
             return False
+
+        # ----------------------------------------------------
+        # REGISTER STREAM HANDLER
+        # ----------------------------------------------------
+
+        if not self._registered:
+
+            await self.register()
+
+        # ----------------------------------------------------
+        # READY
+        # ----------------------------------------------------
 
         self.joined_chats.add(
             chat_id
         )
-
-        if not self._registered:
-            await self.register()
 
         logger.info(
             "VC ready for Zara playback: %s",
@@ -227,7 +601,9 @@ class VoiceChatReceiver:
         update,
     ) -> None:
 
-        update_type = type(update).__name__
+        update_type = type(
+            update
+        ).__name__
 
         if update_type in self._update_types_logged:
             return
@@ -237,6 +613,7 @@ class VoiceChatReceiver:
         )
 
         try:
+
             attributes = {}
 
             for name in dir(update):
@@ -245,6 +622,7 @@ class VoiceChatReceiver:
                     continue
 
                 try:
+
                     value = getattr(
                         update,
                         name,
@@ -253,14 +631,23 @@ class VoiceChatReceiver:
                     if callable(value):
                         continue
 
-                    if isinstance(value, bytes):
+                    if isinstance(
+                        value,
+                        bytes,
+                    ):
+
                         attributes[name] = (
                             f"<bytes:{len(value)}>"
                         )
+
                     else:
-                        text = repr(value)
+
+                        text = repr(
+                            value
+                        )
 
                         if len(text) > 300:
+
                             text = (
                                 text[:300]
                                 + "..."
@@ -272,12 +659,14 @@ class VoiceChatReceiver:
                     continue
 
             logger.info(
-                "PyTgCalls update detected: %s | attrs=%s",
+                "PyTgCalls update detected: "
+                "%s | attrs=%s",
                 update_type,
                 attributes,
             )
 
         except Exception:
+
             logger.exception(
                 "Failed inspecting PyTgCalls update."
             )
@@ -298,6 +687,7 @@ class VoiceChatReceiver:
         )
 
         if value is not None:
+
             try:
                 return int(value)
             except Exception:
@@ -318,6 +708,7 @@ class VoiceChatReceiver:
             )
 
             if value is not None:
+
                 try:
                     return int(value)
                 except Exception:
@@ -338,6 +729,7 @@ class VoiceChatReceiver:
             )
 
             if value is not None:
+
                 try:
                     return int(value)
                 except Exception:
@@ -370,24 +762,40 @@ class VoiceChatReceiver:
         for name in possible_names:
 
             try:
+
                 value = getattr(
                     update,
                     name,
                     None,
                 )
+
             except Exception:
                 continue
 
             if value is None:
                 continue
 
-            if isinstance(value, bytes):
+            if isinstance(
+                value,
+                bytes,
+            ):
+
                 return value
 
-            if isinstance(value, bytearray):
-                return bytes(value)
+            if isinstance(
+                value,
+                bytearray,
+            ):
 
-            if isinstance(value, memoryview):
+                return bytes(
+                    value
+                )
+
+            if isinstance(
+                value,
+                memoryview,
+            ):
+
                 return value.tobytes()
 
         return None
@@ -414,26 +822,32 @@ class VoiceChatReceiver:
             if chat_id is None:
                 return
 
-            audio_data = self._extract_audio_bytes(
-                update
+            audio_data = (
+                self._extract_audio_bytes(
+                    update
+                )
             )
 
             if not audio_data:
                 return
 
             logger.debug(
-                "Received VC audio frame: chat=%s bytes=%s",
+                "Received VC audio frame: "
+                "chat=%s bytes=%s",
                 chat_id,
                 len(audio_data),
             )
 
-            # STT buffering can be connected here later.
-            # Never send arbitrary individual frames
+            # STT buffering will be connected here.
+            #
+            # Do not send individual raw frames
             # directly to Gemini.
 
         except Exception:
+
             logger.exception(
-                "Failed to process PyTgCalls stream frame."
+                "Failed to process "
+                "PyTgCalls stream frame."
             )
 
     # ========================================================
@@ -456,6 +870,7 @@ class VoiceChatReceiver:
             )
 
             if leave_call is None:
+
                 raise RuntimeError(
                     "PyTgCalls leave_call() unavailable."
                 )
@@ -464,7 +879,11 @@ class VoiceChatReceiver:
                 chat_id
             )
 
-            if hasattr(result, "__await__"):
+            if hasattr(
+                result,
+                "__await__",
+            ):
+
                 await result
 
             logger.info(
@@ -485,8 +904,14 @@ class VoiceChatReceiver:
             return False
 
         finally:
+
             self.joined_chats.discard(
                 chat_id
+            )
+
+            self.last_join_error.pop(
+                chat_id,
+                None,
             )
 
     # ========================================================
@@ -498,7 +923,10 @@ class VoiceChatReceiver:
         chat_id: int,
     ) -> bool:
 
-        return int(chat_id) in self.joined_chats
+        return (
+            int(chat_id)
+            in self.joined_chats
+        )
 
     # ========================================================
     # STOP
@@ -510,14 +938,17 @@ class VoiceChatReceiver:
     ) -> None:
 
         if chat_id is not None:
+
             await self.leave(
                 int(chat_id)
             )
+
             return
 
         for current_chat_id in list(
             self.joined_chats
         ):
+
             await self.leave(
                 current_chat_id
             )
@@ -526,22 +957,29 @@ class VoiceChatReceiver:
     # CLEANUP
     # ========================================================
 
-    async def cleanup(self) -> None:
+    async def cleanup(
+        self,
+    ) -> None:
 
         for chat_id in list(
             self.joined_chats
         ):
+
             try:
+
                 await self.leave(
                     chat_id
                 )
+
             except Exception:
+
                 logger.exception(
                     "Failed to cleanup VC %s",
                     chat_id,
                 )
 
         self.joined_chats.clear()
+        self.last_join_error.clear()
 
         self._registered = False
         self._speech_capture_available = False
