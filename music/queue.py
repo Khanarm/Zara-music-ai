@@ -1,32 +1,17 @@
-# music/queue.py
-
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-
 logger = logging.getLogger(__name__)
 
-
-# ============================================================
-# TIME HELPER
-# ============================================================
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# ============================================================
-# TRACK MODEL
-# ============================================================
-
 @dataclass
 class Track:
-    """
-    Represents one music track in Zara's queue.
-    """
-
     title: str
     url: Optional[str] = None
     audio_url: Optional[str] = None
@@ -50,10 +35,6 @@ class Track:
     )
 
     def to_dict(self) -> dict[str, Any]:
-        """
-        Convert track to a dictionary.
-        """
-
         return {
             "title": self.title,
             "url": self.url,
@@ -70,16 +51,8 @@ class Track:
         }
 
 
-# ============================================================
-# QUEUE STORAGE
-# ============================================================
-
 QUEUE: dict[int, list[Track]] = {}
 
-
-# ============================================================
-# INTERNAL HELPERS
-# ============================================================
 
 def _chat_id(chat_id: int) -> int:
     return int(chat_id)
@@ -89,38 +62,19 @@ def _get_queue(
     chat_id: int,
     create: bool = True,
 ) -> list[Track]:
-    """
-    Return the queue for a chat.
-    """
 
     chat_id = _chat_id(chat_id)
 
     if create:
-        return QUEUE.setdefault(
-            chat_id,
-            [],
-        )
+        return QUEUE.setdefault(chat_id, [])
 
-    return QUEUE.get(
-        chat_id,
-        [],
-    )
+    return QUEUE.get(chat_id, [])
 
-
-# ============================================================
-# ADD TRACK
-# ============================================================
 
 def add_to_queue(
     chat_id: int,
     track: Track,
 ) -> int:
-    """
-    Add a track to the end of the queue.
-
-    Returns:
-        Position of the added track.
-    """
 
     if not isinstance(track, Track):
         raise TypeError(
@@ -134,28 +88,20 @@ def add_to_queue(
     position = len(queue)
 
     logger.info(
-        "Added track to queue: chat=%s position=%s title=%s",
+        "Added track: chat=%s position=%s title=%s user=%s",
         chat_id,
         position,
         track.title,
+        track.requested_by,
     )
 
     return position
 
 
-# ============================================================
-# ADD FROM DICTIONARY
-# ============================================================
-
 def add_track(
     chat_id: int,
     track: dict[str, Any],
 ) -> int:
-    """
-    Add a track using a dictionary.
-
-    Useful for search/download modules.
-    """
 
     if not isinstance(track, dict):
         raise TypeError(
@@ -179,7 +125,10 @@ def add_track(
         ),
         thumbnail=track.get("thumbnail"),
         source=track.get("source"),
-        media_type=track.get("media_type", "audio"),
+        media_type=track.get(
+            "media_type",
+            "audio",
+        ),
         metadata=dict(
             track.get(
                 "metadata",
@@ -194,16 +143,9 @@ def add_track(
     )
 
 
-# ============================================================
-# GET NEXT TRACK
-# ============================================================
-
 def get_next(
     chat_id: int,
 ) -> Optional[Track]:
-    """
-    Return the next queued track without removing it.
-    """
 
     queue = _get_queue(
         chat_id,
@@ -216,16 +158,9 @@ def get_next(
     return queue[0]
 
 
-# ============================================================
-# POP NEXT TRACK
-# ============================================================
-
 def pop_next(
     chat_id: int,
 ) -> Optional[Track]:
-    """
-    Remove and return the first queued track.
-    """
 
     chat_id = _chat_id(chat_id)
 
@@ -240,13 +175,10 @@ def pop_next(
     track = queue.pop(0)
 
     if not queue:
-        QUEUE.pop(
-            chat_id,
-            None,
-        )
+        QUEUE.pop(chat_id, None)
 
     logger.info(
-        "Removed next track from queue: chat=%s title=%s",
+        "Popped track: chat=%s title=%s",
         chat_id,
         track.title,
     )
@@ -254,21 +186,12 @@ def pop_next(
     return track
 
 
-# ============================================================
-# REMOVE TRACK
-# ============================================================
-
 def remove_from_queue(
     chat_id: int,
     index: int,
 ) -> Optional[Track]:
-    """
-    Remove a track by zero-based index.
 
-    Example:
-        index=0 -> first track
-        index=1 -> second track
-    """
+    chat_id = _chat_id(chat_id)
 
     queue = _get_queue(
         chat_id,
@@ -280,10 +203,7 @@ def remove_from_queue(
 
     try:
         index = int(index)
-    except (
-        TypeError,
-        ValueError,
-    ):
+    except (TypeError, ValueError):
         return None
 
     if index < 0 or index >= len(queue):
@@ -292,34 +212,83 @@ def remove_from_queue(
     track = queue.pop(index)
 
     if not queue:
-        QUEUE.pop(
-            _chat_id(chat_id),
-            None,
-        )
-
-    logger.info(
-        "Removed track from queue: chat=%s index=%s title=%s",
-        chat_id,
-        index,
-        track.title,
-    )
+        QUEUE.pop(chat_id, None)
 
     return track
 
 
-# ============================================================
-# CLEAR QUEUE
-# ============================================================
+def remove_user_track(
+    chat_id: int,
+    user_id: int,
+) -> Optional[Track]:
+
+    chat_id = _chat_id(chat_id)
+    user_id = int(user_id)
+
+    queue = _get_queue(
+        chat_id,
+        create=False,
+    )
+
+    for index, track in enumerate(queue):
+
+        if track.requested_by == user_id:
+
+            removed = queue.pop(index)
+
+            if not queue:
+                QUEUE.pop(
+                    chat_id,
+                    None,
+                )
+
+            logger.info(
+                "Removed user's track: chat=%s user=%s title=%s",
+                chat_id,
+                user_id,
+                removed.title,
+            )
+
+            return removed
+
+    return None
+
+
+def remove_user_tracks(
+    chat_id: int,
+    user_id: int,
+) -> int:
+
+    chat_id = _chat_id(chat_id)
+    user_id = int(user_id)
+
+    queue = _get_queue(
+        chat_id,
+        create=False,
+    )
+
+    if not queue:
+        return 0
+
+    old = len(queue)
+
+    queue[:] = [
+        track
+        for track in queue
+        if track.requested_by != user_id
+    ]
+
+    removed = old - len(queue)
+
+    if not queue:
+        QUEUE.pop(chat_id, None)
+
+    return removed
+
 
 def clear_queue(
     chat_id: int,
 ) -> int:
-    """
-    Clear the entire queue.
-
-    Returns:
-        Number of tracks removed.
-    """
 
     chat_id = _chat_id(chat_id)
 
@@ -328,28 +297,12 @@ def clear_queue(
         [],
     )
 
-    count = len(queue)
+    return len(queue)
 
-    if count:
-        logger.info(
-            "Cleared queue: chat=%s tracks=%s",
-            chat_id,
-            count,
-        )
-
-    return count
-
-
-# ============================================================
-# QUEUE SIZE
-# ============================================================
 
 def queue_size(
     chat_id: int,
 ) -> int:
-    """
-    Return number of queued tracks.
-    """
 
     return len(
         _get_queue(
@@ -359,35 +312,16 @@ def queue_size(
     )
 
 
-# ============================================================
-# IS EMPTY
-# ============================================================
-
 def is_queue_empty(
     chat_id: int,
 ) -> bool:
-    """
-    Check whether the queue is empty.
-    """
 
-    return queue_size(
-        chat_id
-    ) == 0
+    return queue_size(chat_id) == 0
 
-
-# ============================================================
-# GET ALL TRACKS
-# ============================================================
 
 def get_queue(
     chat_id: int,
 ) -> list[Track]:
-    """
-    Return a copy of the current queue.
-
-    The original internal list cannot be modified
-    accidentally by the caller.
-    """
 
     return list(
         _get_queue(
@@ -397,16 +331,9 @@ def get_queue(
     )
 
 
-# ============================================================
-# QUEUE AS DICTIONARIES
-# ============================================================
-
 def get_queue_dict(
     chat_id: int,
 ) -> list[dict[str, Any]]:
-    """
-    Return queue tracks as dictionaries.
-    """
 
     return [
         track.to_dict()
@@ -414,17 +341,10 @@ def get_queue_dict(
     ]
 
 
-# ============================================================
-# GET TRACK BY INDEX
-# ============================================================
-
 def get_track(
     chat_id: int,
     index: int,
 ) -> Optional[Track]:
-    """
-    Get a queued track by zero-based index.
-    """
 
     queue = _get_queue(
         chat_id,
@@ -433,10 +353,7 @@ def get_track(
 
     try:
         index = int(index)
-    except (
-        TypeError,
-        ValueError,
-    ):
+    except (TypeError, ValueError):
         return None
 
     if index < 0 or index >= len(queue):
@@ -445,18 +362,11 @@ def get_track(
     return queue[index]
 
 
-# ============================================================
-# MOVE TRACK
-# ============================================================
-
 def move_track(
     chat_id: int,
     from_index: int,
     to_index: int,
 ) -> bool:
-    """
-    Move a track to another queue position.
-    """
 
     queue = _get_queue(
         chat_id,
@@ -466,10 +376,7 @@ def move_track(
     try:
         from_index = int(from_index)
         to_index = int(to_index)
-    except (
-        TypeError,
-        ValueError,
-    ):
+    except (TypeError, ValueError):
         return False
 
     if (
@@ -480,9 +387,7 @@ def move_track(
     ):
         return False
 
-    track = queue.pop(
-        from_index
-    )
+    track = queue.pop(from_index)
 
     queue.insert(
         to_index,
@@ -492,18 +397,11 @@ def move_track(
     return True
 
 
-# ============================================================
-# SWAP TRACKS
-# ============================================================
-
 def swap_tracks(
     chat_id: int,
     first_index: int,
     second_index: int,
 ) -> bool:
-    """
-    Swap two queue positions.
-    """
 
     queue = _get_queue(
         chat_id,
@@ -513,10 +411,7 @@ def swap_tracks(
     try:
         first_index = int(first_index)
         second_index = int(second_index)
-    except (
-        TypeError,
-        ValueError,
-    ):
+    except (TypeError, ValueError):
         return False
 
     if (
@@ -535,76 +430,10 @@ def swap_tracks(
     return True
 
 
-# ============================================================
-# REMOVE USER TRACKS
-# ============================================================
-
-def remove_user_tracks(
-    chat_id: int,
-    user_id: int,
-) -> int:
-    """
-    Remove all tracks requested by a specific user.
-
-    Returns:
-        Number of removed tracks.
-    """
-
-    chat_id = _chat_id(chat_id)
-    user_id = int(user_id)
-
-    queue = _get_queue(
-        chat_id,
-        create=False,
-    )
-
-    if not queue:
-        return 0
-
-    original_count = len(queue)
-
-    queue[:] = [
-        track
-        for track in queue
-        if track.requested_by != user_id
-    ]
-
-    removed = (
-        original_count
-        - len(queue)
-    )
-
-    if not queue:
-        QUEUE.pop(
-            chat_id,
-            None,
-        )
-
-    if removed:
-        logger.info(
-            "Removed user tracks: chat=%s user=%s count=%s",
-            chat_id,
-            user_id,
-            removed,
-        )
-
-    return removed
-
-
-# ============================================================
-# SEARCH QUEUE
-# ============================================================
-
 def find_track(
     chat_id: int,
     query: str,
 ) -> Optional[int]:
-    """
-    Find the first queued track matching a title.
-
-    Returns:
-        Zero-based index or None.
-    """
 
     query = str(
         query or ""
@@ -619,22 +448,16 @@ def find_track(
     )
 
     for index, track in enumerate(queue):
+
         if query in track.title.lower():
             return index
 
     return None
 
 
-# ============================================================
-# QUEUE SNAPSHOT
-# ============================================================
-
 def get_queue_snapshot(
     chat_id: int,
 ) -> dict[str, Any]:
-    """
-    Return a useful queue snapshot for player/control modules.
-    """
 
     queue = get_queue(chat_id)
 
@@ -649,48 +472,21 @@ def get_queue_snapshot(
     }
 
 
-# ============================================================
-# REMOVE ALL QUEUES
-# ============================================================
-
 def clear_all_queues() -> int:
-    """
-    Clear queues for every chat.
-
-    Returns:
-        Number of chats cleared.
-    """
 
     count = len(QUEUE)
 
     QUEUE.clear()
 
-    if count:
-        logger.info(
-            "Cleared all music queues: chats=%s",
-            count,
-        )
-
     return count
 
-
-# ============================================================
-# QUEUE EXISTS
-# ============================================================
 
 def queue_exists(
     chat_id: int,
 ) -> bool:
-    """
-    Check whether a chat currently has a queue.
-    """
 
     return _chat_id(chat_id) in QUEUE
 
-
-# ============================================================
-# EXPORT
-# ============================================================
 
 __all__ = [
     "Track",
@@ -700,6 +496,7 @@ __all__ = [
     "get_next",
     "pop_next",
     "remove_from_queue",
+    "remove_user_track",
     "clear_queue",
     "queue_size",
     "is_queue_empty",
