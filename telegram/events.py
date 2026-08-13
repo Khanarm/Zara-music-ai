@@ -243,6 +243,25 @@ async def ensure_zara_in_group(
 
             return False
 
+    except Exception:
+        logger.exception(
+            "Failed to prepare Zara Userbot access for group %s",
+            chat_id,
+        )
+        try:
+            await message.bot.send_message(
+                chat_id,
+                "❌ Zara could not access this group.\n\n"
+                "Please make sure Zara Userbot is not banned or restricted "
+                "and that the Manager Bot has permission to invite users.",
+            )
+        except Exception:
+            logger.debug(
+                "Could not send Zara access error message.",
+                exc_info=True,
+            )
+        return False
+
 # ============================================================
 # USER HELPERS
 # ============================================================
@@ -1144,10 +1163,10 @@ async def handle_music_intent(
                 except Exception:
                     is_admin = False
 
-            result_type, track = await player.skip_for_user(
+            result_type = await player.skip_for_user(
                 chat_id,
                 user_id,
-                admin=is_admin,
+                is_admin=is_admin,
             )
 
             if processing:
@@ -1155,18 +1174,15 @@ async def handle_music_intent(
                 except Exception: pass
 
             if result_type == "current":
-                current = player.current(chat_id)
-                if current:
-                    text_out = (
-                        f"⏭️ <b>{track.title}</b> skipped.\n"
-                        f"▶️ Next: <b>{current.title}</b>"
-                    )
-                else:
-                    text_out = f"⏭️ <b>{track.title}</b> skipped.\n📭 Queue empty hai."
-            elif result_type == "queue":
-                text_out = f"⏭️ Tumhara queued song <b>{track.title}</b> skip kar diya."
+                text_out = "⏭️ Current song skipped."
+            elif result_type == "queued":
+                text_out = "⏭️ Your queued song was removed."
+            elif result_type == "stopped":
+                text_out = "⏭️ Current song skipped. Queue is empty."
+            elif result_type == "empty":
+                text_out = "📭 Nothing is playing."
             else:
-                text_out = "⛔ Tum current song ke requester nahi ho aur tumhara koi queued song nahi hai."
+                text_out = "⛔ You can only skip your own requested song."
 
             await message.bot.send_message(chat_id, text_out)
             return True
@@ -1859,4 +1875,5 @@ __all__ = [
     "get_reply_context",
     "clean_message_text",
     "handle_music_intent",
+    "ensure_zara_in_group",
 ]
