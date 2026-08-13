@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -35,10 +36,12 @@ class MusicPlayer:
     - Queue
     - Current track
     - Playback
+    - Automatic next-track playback
     - Skip
     - Pause/resume
     - Loop
     - Playback failures
+    - Downloaded-file cleanup
     """
 
     def __init__(
@@ -84,6 +87,45 @@ class MusicPlayer:
             chat_id,
             asyncio.Lock(),
         )
+
+    async def _delete_track_file(
+        self,
+        track: Optional[Track],
+    ) -> None:
+        """
+        Delete downloaded audio/video file after it
+        is no longer needed.
+        """
+
+        if track is None:
+            return
+
+        path = getattr(
+            track,
+            "audio_path",
+            None,
+        )
+
+        if not path:
+            return
+
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+
+                logger.info(
+                    "Deleted downloaded track file: %s",
+                    path,
+                )
+
+        except FileNotFoundError:
+            pass
+
+        except Exception:
+            logger.exception(
+                "Failed to delete downloaded track file: %s",
+                path,
+            )
 
     # ========================================================
     # ADD
@@ -327,8 +369,12 @@ class MusicPlayer:
                     return True
 
                 # Playback failed.
-                # Do not leave a broken current track
-                # blocking the queue.
+                # Delete the unusable downloaded file
+                # before moving to the next track.
+
+                await self._delete_track_file(
+                    track
+                )
 
                 logger.error(
                     "Skipping unplayable track "
@@ -368,8 +414,14 @@ class MusicPlayer:
             chat_id
         )
 
+        finished_track = player.current
+
         player.playing = False
         player.paused = False
+
+        # ----------------------------------------------------
+        # LOOP
+        # ----------------------------------------------------
 
         if (
             player.loop
@@ -381,17 +433,18 @@ class MusicPlayer:
             )
 
         logger.info(
-            "Stream ended chat=%s "
-            "track=%s",
+            "Stream ended chat=%s track=%s",
             chat_id,
             (
-                player.current.title
-                if player.current
+                finished_track.title
+                if finished_track
                 else None
             ),
         )
 
-        player.current = None
+        # ----------------------------------------------------
+        # Remove finished stream references
+        # ----------------------------------------------------
 
         try:
 
@@ -407,6 +460,24 @@ class MusicPlayer:
 
         except Exception:
             pass
+
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Delete finished downloaded file.
+        # ----------------------------------------------------
+
+        await self._delete_track_file(
+            finished_track
+        )
+
+        player.current = None
+
+        # ----------------------------------------------------
+        # Automatically play next queued song.
+        #
+        # If queue is empty, play_next() simply returns
+        # False and playback remains stopped.
+        # ----------------------------------------------------
 
         return await self.play_next(
             chat_id
@@ -429,6 +500,60 @@ class MusicPlayer:
 
         player.loop = False
 
+        skipped_track = player.current
+
+        # ----------------------------------------------------
+        # Stop current VC stream first.
+        # ----------------------------------------------------
+
+        try:
+
+            await self.audio_stream.stop(
+                chat_id
+            )
+
+        except Exception:
+            logger.exception(
+                "Failed to stop stream during skip: %s",
+                chat_id,
+            )
+
+        player.playing = False
+        player.paused = False
+
+        # ----------------------------------------------------
+        # Delete the skipped track file.
+        # ----------------------------------------------------
+
+        await self._delete_track_file(
+            skipped_track
+        )
+
+        player.current = None
+
+        try:
+
+            self.audio_stream.current_streams.pop(
+                chat_id,
+                None,
+            )
+
+            self.audio_stream.current_media.pop(
+                chat_id,
+                None,
+            )
+
+        except Exception:
+            pass
+
+        # ----------------------------------------------------
+        # Queue has next song:
+        # automatically play it.
+        #
+        # Queue empty:
+        # playback remains stopped.
+        # ----------------------------------------------------
+
         return await self.play_next(
             chat_id
         )
@@ -449,11 +574,24 @@ class MusicPlayer:
             chat_id
         ):
 
-            ok = await self.audio_stream.stop(
+            player = self._player(
                 chat_id
             )
 
-            player = self._player(
+            current_track = player.current
+
+            # Save queued tracks before clearing.
+            queued_tracks = (
+                list(
+                    get_queue(
+                        chat_id
+                    )
+                )
+                if clear
+                else []
+            )
+
+            ok = await self.audio_stream.stop(
                 chat_id
             )
 
@@ -462,10 +600,45 @@ class MusicPlayer:
             player.current = None
             player.loop = False
 
+            # ------------------------------------------------
+            # Delete current downloaded file.
+            # ------------------------------------------------
+
+            await self._delete_track_file(
+                current_track
+            )
+
+            # ------------------------------------------------
+            # Delete queued downloaded files if queue
+            # is being cleared.
+            # ------------------------------------------------
+
             if clear:
+
+                for track in queued_tracks:
+
+                    await self._delete_track_file(
+                        track
+                    )
+
                 clear_queue(
                     chat_id
                 )
+
+            try:
+
+                self.audio_stream.current_streams.pop(
+                    chat_id,
+                    None,
+                )
+
+                self.audio_stream.current_media.pop(
+                    chat_id,
+                    None,
+                )
+
+            except Exception:
+                pass
 
             logger.info(
                 "Music stopped chat=%s "
@@ -684,9 +857,35 @@ class MusicPlayer:
 
         chat_id = int(chat_id)
 
+        player = self.players.get(
+            chat_id
+        )
+
+        current_track = (
+            player.current
+            if player
+            else None
+        )
+
+        queued_tracks = list(
+            get_queue(
+                chat_id
+            )
+        )
+
         await self.audio_stream.stop(
             chat_id
         )
+
+        await self._delete_track_file(
+            current_track
+        )
+
+        for track in queued_tracks:
+
+            await self._delete_track_file(
+                track
+            )
 
         clear_queue(
             chat_id
@@ -764,4 +963,4 @@ __all__ = [
     "MusicPlayer",
     "get_player",
     "reset_player",
-        ]
+]
