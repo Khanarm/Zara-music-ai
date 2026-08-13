@@ -12,42 +12,29 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-DOWNLOAD_DIR = Path(MUSIC_DOWNLOAD_DIR)
-DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+DOWNLOAD_DIR = Path(
+    MUSIC_DOWNLOAD_DIR
+)
 
-MAX_BYTES = int(MUSIC_MAX_FILE_SIZE_MB) * 1024 * 1024
+DOWNLOAD_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+MAX_BYTES = (
+    int(MUSIC_MAX_FILE_SIZE_MB)
+    * 1024
+    * 1024
+)
 
 
 class MusicDownloader:
-    """
-    Zara Music YouTube downloader.
-
-    Flow:
-
-        YouTube URL
-            ↓
-        yt-dlp
-            ↓
-        local media file
-            ↓
-        FFmpeg
-            ↓
-        normalized MP3
-            ↓
-        PyTgCalls playback
-
-    The downloader keeps the public API used by the rest
-    of the Zara Music system unchanged.
-    """
-
-    # ========================================================
-    # INIT
-    # ========================================================
 
     def __init__(
         self,
         download_dir: str | Path | None = None,
     ):
+
         self.download_dir = Path(
             download_dir or DOWNLOAD_DIR
         )
@@ -70,33 +57,12 @@ class MusicDownloader:
 
         if configured:
 
-            path = Path(
-                configured
-            )
+            path = Path(configured)
 
             if path.is_file():
-
-                logger.info(
-                    "Using YouTube cookies: %s",
-                    path,
-                )
-
                 return str(path)
 
-            logger.warning(
-                "YOUTUBE_COOKIES_FILE configured "
-                "but file does not exist: %s",
-                path,
-            )
-
-        # ----------------------------------------------------
-        # Local cookies directory
-        # ----------------------------------------------------
-
-        root = (
-            Path.cwd()
-            / "cookies"
-        )
+        root = Path.cwd() / "cookies"
 
         if root.exists():
 
@@ -105,47 +71,12 @@ class MusicDownloader:
             )
 
             if files:
-
-                logger.info(
-                    "Using local YouTube cookies: %s",
-                    files[0],
-                )
-
-                return str(
-                    files[0]
-                )
+                return str(files[0])
 
         return None
 
     # ========================================================
-    # FFMPEG
-    # ========================================================
-
-    @staticmethod
-    def _ffmpeg_available() -> bool:
-
-        try:
-
-            result = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-version",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-            )
-
-            return (
-                result.returncode == 0
-            )
-
-        except Exception:
-
-            return False
-
-    # ========================================================
-    # COMMON HEADERS
+    # HEADERS
     # ========================================================
 
     @staticmethod
@@ -166,7 +97,7 @@ class MusicDownloader:
         }
 
     # ========================================================
-    # YT-DLP OPTIONS
+    # OPTIONS
     # ========================================================
 
     def _opts(
@@ -176,45 +107,28 @@ class MusicDownloader:
     ) -> dict:
 
         opts = {
-            # ------------------------------------------------
-            # General
-            # ------------------------------------------------
-
-            "geo_bypass": True,
-            "nocheckcertificate": True,
-
             "quiet": True,
             "no_warnings": True,
 
             "noplaylist": True,
 
-            "retries": 5,
-            "fragment_retries": 5,
+            "geo_bypass": True,
+            "nocheckcertificate": True,
+
+            "retries": 3,
+            "fragment_retries": 3,
+
+            "socket_timeout": 20,
 
             "continuedl": False,
-
             "overwrites": False,
 
-            "socket_timeout": 30,
-
-            # ------------------------------------------------
-            # HTTP
-            # ------------------------------------------------
-
             "http_headers": self._headers(),
-
-            # ------------------------------------------------
-            # Output
-            # ------------------------------------------------
 
             "outtmpl": str(
                 self.download_dir
                 / "%(id)s.%(ext)s"
             ),
-
-            # ------------------------------------------------
-            # YouTube extractor
-            # ------------------------------------------------
 
             "extractor_args": {
                 "youtube": {
@@ -225,48 +139,33 @@ class MusicDownloader:
             },
         }
 
-        # ----------------------------------------------------
-        # Cookies
-        # ----------------------------------------------------
-
         cookie = self._cookies()
 
         if cookie:
-
-            opts[
-                "cookiefile"
-            ] = cookie
-
-        # ----------------------------------------------------
-        # VIDEO
-        # ----------------------------------------------------
+            opts["cookiefile"] = cookie
 
         if video:
 
+            # 360p max.
+            #
+            # Prefer a single MP4 when available
+            # to avoid unnecessary merge work.
             opts.update(
                 {
                     "format": (
-                        "bestvideo[height<=720]"
-                        "[width<=1280]"
+                        "best[height<=360]"
                         "[ext=mp4]"
-                        "+bestaudio[ext=m4a]"
-                        "/best[height<=720]"
-                        "[width<=1280]"
+                        "/best[height<=360]"
                         "/best"
                     ),
-
-                    "merge_output_format": "mp4",
-
-                    "prefer_ffmpeg": True,
                 }
             )
 
-        # ----------------------------------------------------
-        # AUDIO
-        # ----------------------------------------------------
-
         else:
 
+            # Audio only.
+            #
+            # No MP3 conversion here.
             opts.update(
                 {
                     "format": (
@@ -280,60 +179,7 @@ class MusicDownloader:
         return opts
 
     # ========================================================
-    # DOWNLOAD CONFIGURATIONS
-    # ========================================================
-
-    def _download_profiles(
-        self,
-        video: bool,
-    ) -> list[dict]:
-
-        """
-        Different YouTube clients are attempted in order.
-
-        This is intentionally kept small so a failed request
-        does not create excessive traffic.
-        """
-
-        profiles = []
-
-        # ----------------------------------------------------
-        # First attempt: web
-        # ----------------------------------------------------
-
-        profiles.append(
-            self._opts(
-                video=video,
-                player_client="web",
-            )
-        )
-
-        # ----------------------------------------------------
-        # Second attempt: android
-        # ----------------------------------------------------
-
-        profiles.append(
-            self._opts(
-                video=video,
-                player_client="android",
-            )
-        )
-
-        # ----------------------------------------------------
-        # Third attempt: mweb
-        # ----------------------------------------------------
-
-        profiles.append(
-            self._opts(
-                video=video,
-                player_client="mweb",
-            )
-        )
-
-        return profiles
-
-    # ========================================================
-    # FIND MEDIA
+    # FIND FILE
     # ========================================================
 
     def _find_media(
@@ -350,29 +196,25 @@ class MusicDownloader:
             if not path.is_file():
                 continue
 
-            try:
-
-                size = path.stat().st_size
-
-                if size <= 0:
-                    continue
-
-            except OSError:
-
-                continue
-
-            # ------------------------------------------------
-            # Ignore normalized MP3
-            # ------------------------------------------------
-
-            if path.stem.endswith(
-                "_zara"
+            if path.name.endswith(
+                ".part"
             ):
                 continue
 
-            candidates.append(
-                path
-            )
+            if path.name.endswith(
+                ".ytdl"
+            ):
+                continue
+
+            try:
+
+                if path.stat().st_size <= 0:
+                    continue
+
+            except OSError:
+                continue
+
+            candidates.append(path)
 
         if not candidates:
             return None
@@ -383,7 +225,7 @@ class MusicDownloader:
         )
 
     # ========================================================
-    # REMOVE PARTIAL FILES
+    # PARTIAL CLEANUP
     # ========================================================
 
     def _remove_partial(
@@ -391,10 +233,10 @@ class MusicDownloader:
         video_id: str,
     ) -> None:
 
-        patterns = [
+        patterns = (
             f"{video_id}.*.part",
             f"{video_id}.*.ytdl",
-        ]
+        )
 
         for pattern in patterns:
 
@@ -403,173 +245,14 @@ class MusicDownloader:
             ):
 
                 try:
-
                     path.unlink(
                         missing_ok=True
                     )
-
                 except Exception:
-
-                    logger.debug(
-                        "Could not remove partial "
-                        "file: %s",
-                        path,
-                        exc_info=True,
-                    )
+                    pass
 
     # ========================================================
-    # CONVERT AUDIO
-    # ========================================================
-
-    async def _convert_audio(
-        self,
-        source: Path,
-        video_id: str,
-    ) -> Optional[Path]:
-
-        if not source.exists():
-            return None
-
-        if not self._ffmpeg_available():
-
-            logger.error(
-                "FFmpeg binary is not available."
-            )
-
-            return None
-
-        output = (
-            self.download_dir
-            / f"{video_id}_zara.mp3"
-        )
-
-        # ----------------------------------------------------
-        # Already converted
-        # ----------------------------------------------------
-
-        if output.exists():
-
-            try:
-
-                if output.stat().st_size > 0:
-                    return output
-
-            except OSError:
-
-                pass
-
-        command = [
-            "ffmpeg",
-            "-y",
-
-            "-hide_banner",
-            "-loglevel",
-            "error",
-
-            "-i",
-            str(source),
-
-            "-vn",
-
-            "-ac",
-            "2",
-
-            "-ar",
-            "48000",
-
-            "-c:a",
-            "libmp3lame",
-
-            "-b:a",
-            "128k",
-
-            str(output),
-        ]
-
-        logger.info(
-            "Converting audio with FFmpeg: %s",
-            source.name,
-        )
-
-        try:
-
-            process = (
-                await asyncio.create_subprocess_exec(
-                    *command,
-                    stdout=(
-                        asyncio.subprocess.PIPE
-                    ),
-                    stderr=(
-                        asyncio.subprocess.PIPE
-                    ),
-                )
-            )
-
-            stdout, stderr = (
-                await process.communicate()
-            )
-
-            if process.returncode != 0:
-
-                error = (
-                    stderr.decode(
-                        errors="ignore"
-                    ).strip()
-                )
-
-                logger.error(
-                    "FFmpeg conversion failed: %s",
-                    error[-2000:],
-                )
-
-                output.unlink(
-                    missing_ok=True
-                )
-
-                return None
-
-            if not output.exists():
-
-                logger.error(
-                    "FFmpeg completed but output "
-                    "file was not created."
-                )
-
-                return None
-
-            if output.stat().st_size <= 0:
-
-                logger.error(
-                    "FFmpeg created an empty file."
-                )
-
-                output.unlink(
-                    missing_ok=True
-                )
-
-                return None
-
-            logger.info(
-                "Audio normalized successfully: %s",
-                output,
-            )
-
-            return output
-
-        except Exception:
-
-            logger.exception(
-                "Audio FFmpeg conversion failed."
-            )
-
-            output.unlink(
-                missing_ok=True
-            )
-
-            return None
-
-    # ========================================================
-    # DOWNLOAD ONE PROFILE
+    # DOWNLOAD PROFILE
     # ========================================================
 
     def _download_with_profile(
@@ -585,48 +268,30 @@ class MusicDownloader:
             opts
         ) as ydl:
 
-            # ------------------------------------------------
-            # Get metadata first
-            # ------------------------------------------------
-
             info = ydl.extract_info(
                 url,
                 download=False,
             )
 
             if not info:
-
                 raise ValueError(
-                    "yt-dlp returned no metadata"
+                    "No YouTube metadata."
                 )
 
             video_id = str(
-                info.get("id")
-                or ""
+                info.get("id") or ""
             )
 
             if not video_id:
-
                 raise ValueError(
-                    "YouTube video ID missing"
+                    "YouTube video ID missing."
                 )
 
-            # ------------------------------------------------
-            # Existing file
-            # ------------------------------------------------
-
-            existing = (
-                self._find_media(
-                    video_id
-                )
+            existing = self._find_media(
+                video_id
             )
 
             if existing:
-
-                logger.info(
-                    "Using existing media: %s",
-                    existing,
-                )
 
                 path = existing
 
@@ -636,35 +301,20 @@ class MusicDownloader:
                     video_id
                 )
 
-                logger.info(
-                    "Starting yt-dlp download "
-                    "for video=%s",
-                    video_id,
-                )
-
                 ydl.download(
                     [url]
                 )
 
-                path = (
-                    self._find_media(
-                        video_id
-                    )
+                path = self._find_media(
+                    video_id
                 )
 
                 if path is None:
-
                     raise FileNotFoundError(
-                        "yt-dlp completed without "
-                        "producing a media file"
+                        "yt-dlp produced no media."
                     )
 
-            # ------------------------------------------------
-            # Validate
-            # ------------------------------------------------
-
             if not path.exists():
-
                 raise FileNotFoundError(
                     str(path)
                 )
@@ -672,9 +322,8 @@ class MusicDownloader:
             size = path.stat().st_size
 
             if size <= 0:
-
                 raise ValueError(
-                    "Downloaded media is empty."
+                    "Downloaded file is empty."
                 )
 
             if size > MAX_BYTES:
@@ -685,7 +334,7 @@ class MusicDownloader:
 
                 raise ValueError(
                     "Downloaded media exceeds "
-                    "MUSIC_MAX_FILE_SIZE_MB"
+                    "MUSIC_MAX_FILE_SIZE_MB."
                 )
 
             return (
@@ -694,7 +343,7 @@ class MusicDownloader:
             )
 
     # ========================================================
-    # DOWNLOAD SYNC
+    # SYNC DOWNLOAD
     # ========================================================
 
     def _download_sync(
@@ -705,42 +354,27 @@ class MusicDownloader:
 
         last_error = None
 
-        profiles = (
-            self._download_profiles(
-                video
-            )
+        clients = (
+            "web",
+            "android",
+            "mweb",
         )
 
-        for index, opts in enumerate(
-            profiles,
-            1,
-        ):
+        for client in clients:
 
-            client = (
-                opts
-                .get(
-                    "extractor_args",
-                    {}
-                )
-                .get(
-                    "youtube",
-                    {}
-                )
-                .get(
-                    "player_client",
-                    ["unknown"],
-                )[0]
-            )
-
-            logger.info(
-                "YouTube download attempt %s/%s "
-                "using client=%s",
-                index,
-                len(profiles),
-                client,
+            opts = self._opts(
+                video=video,
+                player_client=client,
             )
 
             try:
+
+                logger.info(
+                    "YouTube download "
+                    "client=%s video=%s",
+                    client,
+                    video,
+                )
 
                 return (
                     self._download_with_profile(
@@ -755,66 +389,20 @@ class MusicDownloader:
                 last_error = exc
 
                 logger.warning(
-                    "YouTube download attempt failed "
-                    "using client=%s: %s",
+                    "Download failed client=%s: %s",
                     client,
                     exc,
                 )
 
-                # Remove incomplete files before
-                # trying another profile.
-                try:
-
-                    import yt_dlp
-
-                    # Extract ID without downloading
-                    basic_opts = {
-                        "quiet": True,
-                        "no_warnings": True,
-                        "noplaylist": True,
-                    }
-
-                    with yt_dlp.YoutubeDL(
-                        basic_opts
-                    ) as ydl:
-
-                        info = (
-                            ydl.extract_info(
-                                url,
-                                download=False,
-                            )
-                        )
-
-                    if info:
-
-                        video_id = str(
-                            info.get("id")
-                            or ""
-                        )
-
-                        if video_id:
-
-                            self._remove_partial(
-                                video_id
-                            )
-
-                except Exception:
-
-                    logger.debug(
-                        "Partial-file cleanup failed.",
-                        exc_info=True,
-                    )
-
         if last_error:
-
             raise last_error
 
         raise RuntimeError(
-            "All YouTube download profiles failed."
+            "All download profiles failed."
         )
 
     # ========================================================
-    # DOWNLOAD YOUTUBE
+    # YOUTUBE DOWNLOAD
     # ========================================================
 
     async def download_youtube(
@@ -829,70 +417,16 @@ class MusicDownloader:
 
         try:
 
-            path, info = await asyncio.to_thread(
+            return await asyncio.to_thread(
                 self._download_sync,
                 url,
                 video,
             )
 
-            source = Path(
-                path
-            )
-
-            # ------------------------------------------------
-            # Normalize audio
-            # ------------------------------------------------
-
-            if not video:
-
-                normalized = (
-                    await self._convert_audio(
-                        source,
-                        str(
-                            info.get("id")
-                        ),
-                    )
-                )
-
-                if normalized is None:
-                    return None
-
-                # ------------------------------------------------
-                # Remove original source
-                # ------------------------------------------------
-
-                if (
-                    normalized.resolve()
-                    != source.resolve()
-                ):
-
-                    try:
-
-                        source.unlink(
-                            missing_ok=True
-                        )
-
-                    except Exception:
-
-                        logger.warning(
-                            "Could not remove original "
-                            "audio file: %s",
-                            source,
-                        )
-
-                path = str(
-                    normalized
-                )
-
-            return (
-                path,
-                info,
-            )
-
         except Exception:
 
             logger.exception(
-                "yt-dlp download failed: %s",
+                "YouTube download failed: %s",
                 url,
             )
 
@@ -912,36 +446,20 @@ class MusicDownloader:
         if track is None:
             return None
 
-        # ----------------------------------------------------
-        # Dict track
-        # ----------------------------------------------------
-
         if isinstance(
             track,
             dict,
         ):
 
             path = (
-                track.get(
-                    "audio_path"
-                )
-                or track.get(
-                    "path"
-                )
+                track.get("audio_path")
+                or track.get("path")
             )
 
             url = (
-                track.get(
-                    "url"
-                )
-                or track.get(
-                    "link"
-                )
+                track.get("url")
+                or track.get("link")
             )
-
-        # ----------------------------------------------------
-        # Track object
-        # ----------------------------------------------------
 
         else:
 
@@ -957,37 +475,15 @@ class MusicDownloader:
                 None,
             )
 
-        # ----------------------------------------------------
-        # Existing local file
-        # ----------------------------------------------------
-
         if path:
 
-            local = Path(
-                path
-            )
+            local = Path(path)
 
             if local.is_file():
-
-                if video:
-                    return str(local)
-
-                if local.name.endswith(
-                    "_zara.mp3"
-                ):
-
-                    return str(local)
-
-        # ----------------------------------------------------
-        # No URL
-        # ----------------------------------------------------
+                return str(local)
 
         if not url:
             return None
-
-        # ----------------------------------------------------
-        # Download
-        # ----------------------------------------------------
 
         result = (
             await self.download_youtube(
@@ -1012,20 +508,14 @@ class MusicDownloader:
 
         try:
 
-            p = Path(
-                path
-            ).resolve()
+            p = Path(path).resolve()
 
             root = (
                 self.download_dir
                 .resolve()
             )
 
-            # Security: only delete files
-            # inside download directory.
-            p.relative_to(
-                root
-            )
+            p.relative_to(root)
 
             p.unlink(
                 missing_ok=True
@@ -1035,9 +525,10 @@ class MusicDownloader:
 
         except Exception:
 
-            logger.exception(
+            logger.warning(
                 "Failed deleting media: %s",
                 path,
+                exc_info=True,
             )
 
             return False
@@ -1051,17 +542,10 @@ class MusicDownloader:
         count = 0
 
         try:
-
             files = list(
                 self.download_dir.iterdir()
             )
-
         except Exception:
-
-            logger.exception(
-                "Failed reading music directory."
-            )
-
             return 0
 
         for path in files:
@@ -1072,22 +556,13 @@ class MusicDownloader:
             try:
 
                 path.unlink()
-
                 count += 1
 
             except OSError:
-
-                logger.exception(
-                    "Failed deleting %s",
-                    path,
-                )
+                pass
 
         return count
 
-
-# ============================================================
-# SINGLETON
-# ============================================================
 
 _downloader: Optional[
     MusicDownloader
@@ -1128,4 +603,4 @@ __all__ = [
     "get_downloader",
     "reset_downloader",
     "download_track",
-]
+    ]
