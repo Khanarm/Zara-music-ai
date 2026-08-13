@@ -60,9 +60,11 @@ class MusicPlayer:
         chat_id: int,
     ) -> PlayerState:
 
+        chat_id = int(chat_id)
+
         return self.players.setdefault(
-            int(chat_id),
-            PlayerState(int(chat_id)),
+            chat_id,
+            PlayerState(chat_id),
         )
 
     def _lock(
@@ -76,7 +78,7 @@ class MusicPlayer:
         )
 
     # ========================================================
-    # FILE CLEANUP
+    # CLEAN FILE
     # ========================================================
 
     async def _delete_track_file(
@@ -84,7 +86,7 @@ class MusicPlayer:
         track: Optional[Track],
     ) -> None:
 
-        if not track:
+        if track is None:
             return
 
         path = getattr(
@@ -109,9 +111,10 @@ class MusicPlayer:
                 )
 
                 logger.info(
-                    "Deleted played media: %s",
+                    "Deleted media: %s",
                     path,
                 )
+
                 return
 
         except Exception:
@@ -130,7 +133,7 @@ class MusicPlayer:
             )
 
             logger.info(
-                "Deleted played media directly: %s",
+                "Deleted media directly: %s",
                 path,
             )
 
@@ -167,7 +170,9 @@ class MusicPlayer:
         track: Track,
     ) -> None:
 
-        self._cancel_watcher(chat_id)
+        self._cancel_watcher(
+            chat_id
+        )
 
         duration = getattr(
             track,
@@ -176,24 +181,29 @@ class MusicPlayer:
         )
 
         try:
-            duration = float(duration or 0)
+            duration = float(
+                duration or 0
+            )
+
         except Exception:
             duration = 0
 
         if duration <= 0:
+
             logger.warning(
-                "No duration for track watcher: %s",
+                "Invalid duration for watcher: %s",
                 track.title,
             )
+
             return
 
-        self._watchers[int(chat_id)] = (
-            asyncio.create_task(
-                self._watch_stream(
-                    int(chat_id),
-                    track,
-                    duration,
-                )
+        self._watchers[
+            int(chat_id)
+        ] = asyncio.create_task(
+            self._watch_stream(
+                int(chat_id),
+                track,
+                duration,
             )
         )
 
@@ -206,15 +216,17 @@ class MusicPlayer:
 
         try:
 
-            # Small safety margin so PyTgCalls gets
-            # time to report the end of the stream.
             await asyncio.sleep(
-                max(0.5, duration + 0.35)
+                max(
+                    0.75,
+                    duration + 0.5,
+                )
             )
 
-            player = self._player(chat_id)
+            player = self._player(
+                chat_id
+            )
 
-            # Make sure this is still the same song.
             if player.current is not track:
                 return
 
@@ -222,8 +234,8 @@ class MusicPlayer:
                 return
 
             logger.info(
-                "Track duration reached. "
-                "Starting next automatically: chat=%s title=%s",
+                "Track finished by duration: "
+                "chat=%s title=%s",
                 chat_id,
                 track.title,
             )
@@ -238,7 +250,7 @@ class MusicPlayer:
         except Exception:
 
             logger.exception(
-                "Playback watcher failed for %s",
+                "Playback watcher failed: %s",
                 chat_id,
             )
 
@@ -255,7 +267,10 @@ class MusicPlayer:
 
         chat_id = int(chat_id)
 
-        if not isinstance(track, Track):
+        if not isinstance(
+            track,
+            Track,
+        ):
             raise TypeError(
                 "track must be Track"
             )
@@ -265,7 +280,9 @@ class MusicPlayer:
             track,
         )
 
-        player = self._player(chat_id)
+        player = self._player(
+            chat_id
+        )
 
         should_start = (
             play_now
@@ -285,7 +302,7 @@ class MusicPlayer:
             if not started:
 
                 logger.error(
-                    "Could not start: %s",
+                    "Failed to start track: %s",
                     track.title,
                 )
 
@@ -302,11 +319,18 @@ class MusicPlayer:
 
         chat_id = int(chat_id)
 
-        player = self._player(chat_id)
+        player = self._player(
+            chat_id
+        )
 
         track = player.current
 
         if track is None:
+
+            logger.error(
+                "PLAY CURRENT FAILED: no current track."
+            )
+
             return False
 
         path = getattr(
@@ -316,15 +340,32 @@ class MusicPlayer:
         )
 
         if not path:
+
+            logger.error(
+                "PLAY CURRENT FAILED: no media path: %s",
+                track.title,
+            )
+
             return False
 
+        media_type = getattr(
+            track,
+            "media_type",
+            "audio",
+        )
+
         video = (
-            getattr(
-                track,
-                "media_type",
-                "audio",
-            )
+            str(media_type).lower()
             == "video"
+        )
+
+        logger.info(
+            "Starting current track: "
+            "chat=%s title=%s media=%s path=%s",
+            chat_id,
+            track.title,
+            media_type,
+            path,
         )
 
         ok = await self.audio_stream.play(
@@ -338,6 +379,11 @@ class MusicPlayer:
             player.playing = False
             player.paused = False
 
+            logger.error(
+                "AudioStream playback failed: %s",
+                track.title,
+            )
+
             return False
 
         player.playing = True
@@ -349,7 +395,7 @@ class MusicPlayer:
         )
 
         logger.info(
-            "PLAYING chat=%s title=%s requested_by=%s",
+            "PLAYING SUCCESS chat=%s title=%s requester=%s",
             chat_id,
             track.title,
             track.requested_by,
@@ -368,9 +414,17 @@ class MusicPlayer:
 
         chat_id = int(chat_id)
 
-        async with self._lock(chat_id):
+        async with self._lock(
+            chat_id
+        ):
 
-            player = self._player(chat_id)
+            player = self._player(
+                chat_id
+            )
+
+            # ------------------------------------------------
+            # LOOP
+            # ------------------------------------------------
 
             if (
                 player.loop
@@ -386,7 +440,13 @@ class MusicPlayer:
             player.playing = False
             player.paused = False
 
-            self._cancel_watcher(chat_id)
+            self._cancel_watcher(
+                chat_id
+            )
+
+            # ------------------------------------------------
+            # Remove old media
+            # ------------------------------------------------
 
             if old_track is not None:
 
@@ -394,9 +454,15 @@ class MusicPlayer:
                     old_track
                 )
 
+            # ------------------------------------------------
+            # Find next valid track
+            # ------------------------------------------------
+
             while True:
 
-                track = pop_next(chat_id)
+                track = pop_next(
+                    chat_id
+                )
 
                 if track is None:
 
@@ -415,6 +481,11 @@ class MusicPlayer:
                 if ok:
                     return True
 
+                logger.error(
+                    "Skipping failed track: %s",
+                    track.title,
+                )
+
                 player.current = None
                 player.playing = False
                 player.paused = False
@@ -423,11 +494,13 @@ class MusicPlayer:
                     track
                 )
 
-                if is_queue_empty(chat_id):
+                if is_queue_empty(
+                    chat_id
+                ):
                     return False
 
     # ========================================================
-    # STREAM ENDED
+    # STREAM END
     # ========================================================
 
     async def on_stream_ended(
@@ -437,14 +510,22 @@ class MusicPlayer:
 
         chat_id = int(chat_id)
 
-        self._cancel_watcher(chat_id)
+        self._cancel_watcher(
+            chat_id
+        )
 
-        player = self._player(chat_id)
+        player = self._player(
+            chat_id
+        )
 
         finished = player.current
 
         player.playing = False
         player.paused = False
+
+        # ----------------------------------------------------
+        # LOOP
+        # ----------------------------------------------------
 
         if (
             player.loop
@@ -454,6 +535,10 @@ class MusicPlayer:
             return await self.play_current(
                 chat_id
             )
+
+        # ----------------------------------------------------
+        # Clear current media state
+        # ----------------------------------------------------
 
         player.current = None
 
@@ -469,15 +554,25 @@ class MusicPlayer:
                 None,
             )
 
+            self.audio_stream.connected_chats.discard(
+                chat_id
+            )
+
         except Exception:
             pass
+
+        # ----------------------------------------------------
+        # Delete finished file
+        # ----------------------------------------------------
 
         await self._delete_track_file(
             finished
         )
 
-        # IMPORTANT:
-        # Automatically continue queue.
+        # ----------------------------------------------------
+        # Continue queue
+        # ----------------------------------------------------
+
         return await self.play_next(
             chat_id
         )
@@ -491,30 +586,44 @@ class MusicPlayer:
         chat_id: int,
         user_id: int,
         is_admin: bool = False,
-    ) -> str:
+    ) -> tuple[str, Optional[Track]]:
 
         chat_id = int(chat_id)
         user_id = int(user_id)
 
-        player = self._player(chat_id)
+        player = self._player(
+            chat_id
+        )
 
-        # Admin/owner can skip current song.
+        # ----------------------------------------------------
+        # ADMIN
+        # ----------------------------------------------------
+
         if is_admin:
 
             if player.current is None:
+                return (
+                    "empty",
+                    None,
+                )
 
-                return "empty"
+            current = player.current
 
-            self._cancel_watcher(chat_id)
+            self._cancel_watcher(
+                chat_id
+            )
+
+            result = await self.play_next(
+                chat_id
+            )
 
             return (
-                "current"
-                if await self.play_next(chat_id)
-                else "stopped"
+                "current" if result else "stopped",
+                current,
             )
 
         # ----------------------------------------------------
-        # User's own current song
+        # OWN CURRENT SONG
         # ----------------------------------------------------
 
         if (
@@ -522,20 +631,23 @@ class MusicPlayer:
             and player.current.requested_by == user_id
         ):
 
-            self._cancel_watcher(chat_id)
+            current = player.current
+
+            self._cancel_watcher(
+                chat_id
+            )
 
             result = await self.play_next(
                 chat_id
             )
 
             return (
-                "current"
-                if result
-                else "stopped"
+                "current" if result else "stopped",
+                current,
             )
 
         # ----------------------------------------------------
-        # User's own queued song
+        # OWN QUEUED SONG
         # ----------------------------------------------------
 
         removed = remove_user_track(
@@ -549,12 +661,18 @@ class MusicPlayer:
                 removed
             )
 
-            return "queued"
+            return (
+                "queued",
+                removed,
+            )
 
-        return "denied"
+        return (
+            "denied",
+            None,
+        )
 
     # ========================================================
-    # NORMAL SKIP
+    # SKIP
     # ========================================================
 
     async def skip(
@@ -562,12 +680,16 @@ class MusicPlayer:
         chat_id: int,
     ) -> bool:
 
-        player = self._player(chat_id)
+        player = self._player(
+            chat_id
+        )
 
         if player.current is None:
             return False
 
-        self._cancel_watcher(chat_id)
+        self._cancel_watcher(
+            chat_id
+        )
 
         return await self.play_next(
             chat_id
@@ -585,11 +707,17 @@ class MusicPlayer:
 
         chat_id = int(chat_id)
 
-        self._cancel_watcher(chat_id)
+        self._cancel_watcher(
+            chat_id
+        )
 
-        async with self._lock(chat_id):
+        async with self._lock(
+            chat_id
+        ):
 
-            player = self._player(chat_id)
+            player = self._player(
+                chat_id
+            )
 
             current = player.current
 
@@ -610,9 +738,13 @@ class MusicPlayer:
 
             if clear:
 
-                queued = get_queue(chat_id)
+                queued = list(
+                    get_queue(chat_id)
+                )
 
-                clear_queue(chat_id)
+                clear_queue(
+                    chat_id
+                )
 
                 for track in queued:
 
@@ -620,7 +752,7 @@ class MusicPlayer:
                         track
                     )
 
-            return ok
+            return bool(ok)
 
     # ========================================================
     # PAUSE
@@ -637,10 +769,16 @@ class MusicPlayer:
 
         if ok:
 
-            player = self._player(chat_id)
+            player = self._player(
+                chat_id
+            )
 
             player.paused = True
             player.playing = False
+
+            self._cancel_watcher(
+                chat_id
+            )
 
         return bool(ok)
 
@@ -659,7 +797,9 @@ class MusicPlayer:
 
         if ok:
 
-            player = self._player(chat_id)
+            player = self._player(
+                chat_id
+            )
 
             player.paused = False
             player.playing = True
@@ -683,9 +823,13 @@ class MusicPlayer:
         enabled: bool,
     ) -> bool:
 
-        player = self._player(chat_id)
+        player = self._player(
+            chat_id
+        )
 
-        player.loop = bool(enabled)
+        player.loop = bool(
+            enabled
+        )
 
         return player.loop
 
@@ -694,7 +838,9 @@ class MusicPlayer:
         chat_id: int,
     ) -> bool:
 
-        player = self._player(chat_id)
+        player = self._player(
+            chat_id
+        )
 
         player.loop = not player.loop
 
@@ -728,14 +874,18 @@ class MusicPlayer:
         chat_id: int,
     ) -> list[Track]:
 
-        return get_queue(int(chat_id))
+        return get_queue(
+            int(chat_id)
+        )
 
     def queue_size(
         self,
         chat_id: int,
     ) -> int:
 
-        return queue_size(int(chat_id))
+        return queue_size(
+            int(chat_id)
+        )
 
     # ========================================================
     # STATE
@@ -815,13 +965,17 @@ class MusicPlayer:
 
         chat_id = int(chat_id)
 
-        self._cancel_watcher(chat_id)
+        self._cancel_watcher(
+            chat_id
+        )
 
         await self.audio_stream.stop(
             chat_id
         )
 
-        clear_queue(chat_id)
+        clear_queue(
+            chat_id
+        )
 
         self.players.pop(
             chat_id,
@@ -840,10 +994,13 @@ class MusicPlayer:
         ):
 
             try:
+
                 await self.cleanup_chat(
                     chat_id
                 )
+
             except Exception:
+
                 logger.exception(
                     "Music cleanup failed: %s",
                     chat_id,
