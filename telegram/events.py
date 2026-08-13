@@ -1031,8 +1031,157 @@ async def handle_text_message(
         message
     )
 
+    # -------------------------------------------
+
     # --------------------------------------------------------
-    # Group data
+    # GROUP DATA
     # --------------------------------------------------------
 
-    
+    group_settings = None
+
+    if is_group_message(
+        message
+    ):
+
+        group_settings = (
+            await get_group_settings(
+                message.chat.id
+            )
+        )
+
+        # ----------------------------------------------------
+        # MUSIC COMMANDS
+        #
+        # Music commands do NOT require:
+        # - @Zara mention
+        # - reply to Zara
+        #
+        # Examples:
+        # /play Arijit Singh
+        # play Arijit Singh
+        # pause
+        # resume
+        # skip
+        # stop music
+        # queue
+        # remove
+        # ----------------------------------------------------
+
+        try:
+
+            intent_result = await detect_intent(
+                text
+            )
+
+            if is_music_intent(
+                intent_result.intent
+            ):
+
+                handled = await handle_music_intent(
+                    message,
+                    intent_result.intent,
+                )
+
+                if handled:
+                    return
+
+        except Exception:
+
+            logger.exception(
+                "Music command handling failed."
+            )
+
+        # ----------------------------------------------------
+        # Normal AI messages still follow the normal
+        # group mention/reply/permission rules.
+        # ----------------------------------------------------
+
+        if not should_answer_group(
+            message,
+            group_settings,
+        ):
+
+            return
+
+    # --------------------------------------------------------
+    # NON-GROUP MUSIC COMMANDS
+    # --------------------------------------------------------
+    #
+    # Allow music commands in private chat too.
+    # This is useful for testing the music system.
+    #
+    # Group music commands were already handled above.
+    # --------------------------------------------------------
+
+    else:
+
+        try:
+
+            intent_result = await detect_intent(
+                text
+            )
+
+            if is_music_intent(
+                intent_result.intent
+            ):
+
+                handled = await handle_music_intent(
+                    message,
+                    intent_result.intent,
+                )
+
+                if handled:
+                    return
+
+        except Exception:
+
+            logger.exception(
+                "Music command handling failed."
+            )
+
+    # --------------------------------------------------------
+    # NORMAL AI MESSAGE
+    # --------------------------------------------------------
+    #
+    # If the message reached here:
+    #
+    # - It was not handled as a music command
+    # - OR it is a normal AI message
+    #
+    # Group permission rules have already been checked above.
+    # --------------------------------------------------------
+
+    try:
+
+        reply_context = await get_reply_context(
+            message
+        )
+
+        response = await chat(
+            user_id=user_id,
+            chat_id=(
+                message.chat.id
+                if message.chat
+                else None
+            ),
+            text=text,
+            reply_context=reply_context,
+        )
+
+        if not response:
+            return
+
+        await message.answer(
+            response
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Zara AI failed for user %s",
+            user_id,
+        )
+
+        await message.answer(
+            "Sorry, abhi Zara response nahi de pa rahi hai."
+                )    
