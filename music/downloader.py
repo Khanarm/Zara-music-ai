@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 import os
 from pathlib import Path
@@ -11,11 +12,20 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-DOWNLOAD_DIR = Path(MUSIC_DOWNLOAD_DIR)
+
+# ============================================================
+# DOWNLOAD DIRECTORY
+# ============================================================
+
+DOWNLOAD_DIR = Path(
+    MUSIC_DOWNLOAD_DIR
+)
+
 DOWNLOAD_DIR.mkdir(
     parents=True,
     exist_ok=True,
 )
+
 
 MAX_BYTES = (
     int(MUSIC_MAX_FILE_SIZE_MB)
@@ -45,6 +55,79 @@ class MusicDownloader:
     # ========================================================
 
     def _cookies(self) -> Optional[str]:
+        """
+        Resolve YouTube cookies.
+
+        Priority:
+
+        1. YOUTUBE_COOKIES_BASE64
+        2. YOUTUBE_COOKIES_FILE
+        3. /app/cookies/youtube.txt
+        4. ./cookies/youtube.txt
+        5. ./cookies/*.txt
+
+        Railway recommended:
+            YOUTUBE_COOKIES_BASE64=<base64 cookies>
+        """
+
+        # ----------------------------------------------------
+        # RAILWAY BASE64 COOKIES
+        # ----------------------------------------------------
+
+        encoded = os.getenv(
+            "YOUTUBE_COOKIES_BASE64",
+            "",
+        ).strip()
+
+        if encoded:
+
+            cookie_dir = Path(
+                "/app/cookies"
+            )
+
+            try:
+
+                cookie_dir.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+
+                cookie_path = (
+                    cookie_dir
+                    / "youtube.txt"
+                )
+
+                decoded = base64.b64decode(
+                    encoded,
+                    validate=True,
+                )
+
+                if not decoded:
+                    raise ValueError(
+                        "Decoded YouTube cookies are empty."
+                    )
+
+                cookie_path.write_bytes(
+                    decoded
+                )
+
+                logger.info(
+                    "YouTube cookies loaded from "
+                    "YOUTUBE_COOKIES_BASE64."
+                )
+
+                return str(cookie_path)
+
+            except Exception:
+
+                logger.exception(
+                    "Failed to decode "
+                    "YOUTUBE_COOKIES_BASE64."
+                )
+
+        # ----------------------------------------------------
+        # EXPLICIT COOKIE FILE
+        # ----------------------------------------------------
 
         configured = os.getenv(
             "YOUTUBE_COOKIES_FILE",
@@ -53,40 +136,86 @@ class MusicDownloader:
 
         if configured:
 
-            path = Path(configured)
+            path = Path(
+                configured
+            )
 
             if path.is_file():
-                logger.info(
-                    "YouTube cookies enabled: %s",
-                    path,
-                )
-                return str(path)
-
-            logger.warning(
-                "YOUTUBE_COOKIES_FILE configured but file "
-                "does not exist: %s",
-                path,
-            )
-
-        root = Path.cwd() / "cookies"
-
-        if root.exists():
-
-            files = sorted(
-                root.glob("*.txt")
-            )
-
-            if files:
 
                 logger.info(
                     "Using YouTube cookies file: %s",
-                    files[0],
+                    path,
                 )
 
-                return str(files[0])
+                return str(path)
 
-        logger.info(
-            "No YouTube cookies configured."
+            logger.warning(
+                "YOUTUBE_COOKIES_FILE is configured "
+                "but file does not exist: %s",
+                path,
+            )
+
+        # ----------------------------------------------------
+        # DEFAULT COOKIE FILES
+        # ----------------------------------------------------
+
+        candidates = (
+            Path(
+                "/app/cookies/youtube.txt"
+            ),
+            Path.cwd()
+            / "cookies"
+            / "youtube.txt",
+        )
+
+        for path in candidates:
+
+            if path.is_file():
+
+                logger.info(
+                    "Using YouTube cookies file: %s",
+                    path,
+                )
+
+                return str(path)
+
+        # ----------------------------------------------------
+        # FALLBACK: ANY TXT FILE
+        # ----------------------------------------------------
+
+        root = (
+            Path.cwd()
+            / "cookies"
+        )
+
+        if root.exists():
+
+            try:
+
+                files = sorted(
+                    root.glob("*.txt")
+                )
+
+                for path in files:
+
+                    if path.is_file():
+
+                        logger.info(
+                            "Using YouTube cookies file: %s",
+                            path,
+                        )
+
+                        return str(path)
+
+            except Exception:
+
+                logger.debug(
+                    "Failed scanning cookies directory.",
+                    exc_info=True,
+                )
+
+        logger.warning(
+            "No YouTube cookies found."
         )
 
         return None
@@ -122,37 +251,25 @@ class MusicDownloader:
         player_client: str = "web",
     ) -> dict:
 
-        if video:
-
-            media_format = (
-                "best[height<=360][ext=mp4]"
-                "/best[height<=360]"
-                "/best"
-            )
-
-        else:
-
-            media_format = (
-                "bestaudio[ext=m4a]"
-                "/bestaudio"
-                "/best"
-            )
-
         opts = {
             "quiet": True,
-            "no_warnings": False,
+
+            "no_warnings": True,
 
             "noplaylist": True,
 
             "geo_bypass": True,
+
             "nocheckcertificate": True,
 
-            "retries": 2,
-            "fragment_retries": 2,
+            "retries": 3,
+
+            "fragment_retries": 3,
 
             "socket_timeout": 20,
 
             "continuedl": False,
+
             "overwrites": False,
 
             "http_headers": self._headers(),
@@ -161,8 +278,6 @@ class MusicDownloader:
                 self.download_dir
                 / "%(id)s.%(ext)s"
             ),
-
-            "format": media_format,
 
             "extractor_args": {
                 "youtube": {
@@ -173,15 +288,57 @@ class MusicDownloader:
             },
         }
 
+        # ----------------------------------------------------
+        # COOKIES
+        # ----------------------------------------------------
+
         cookie = self._cookies()
 
         if cookie:
+
             opts["cookiefile"] = cookie
+
+            logger.debug(
+                "yt-dlp will use YouTube cookies."
+            )
+
+        # ----------------------------------------------------
+        # VIDEO
+        # ----------------------------------------------------
+
+        if video:
+
+            opts.update(
+                {
+                    "format": (
+                        "best[height<=360]"
+                        "[ext=mp4]"
+                        "/best[height<=360]"
+                        "/best"
+                    ),
+                }
+            )
+
+        # ----------------------------------------------------
+        # AUDIO
+        # ----------------------------------------------------
+
+        else:
+
+            opts.update(
+                {
+                    "format": (
+                        "bestaudio[ext=m4a]"
+                        "/bestaudio"
+                        "/best"
+                    ),
+                }
+            )
 
         return opts
 
     # ========================================================
-    # FIND MEDIA
+    # FIND FILE
     # ========================================================
 
     def _find_media(
@@ -198,24 +355,30 @@ class MusicDownloader:
             if not path.is_file():
                 continue
 
-            if path.name.endswith(".part"):
+            if path.name.endswith(
+                ".part"
+            ):
                 continue
 
-            if path.name.endswith(".ytdl"):
+            if path.name.endswith(
+                ".ytdl"
+            ):
                 continue
 
             try:
 
                 size = path.stat().st_size
 
+                if size <= 0:
+                    continue
+
             except OSError:
 
                 continue
 
-            if size <= 0:
-                continue
-
-            candidates.append(path)
+            candidates.append(
+                path
+            )
 
         if not candidates:
             return None
@@ -254,13 +417,13 @@ class MusicDownloader:
                 except Exception:
 
                     logger.debug(
-                        "Could not remove partial file: %s",
+                        "Failed removing partial file: %s",
                         path,
                         exc_info=True,
                     )
 
     # ========================================================
-    # DOWNLOAD PROFILE
+    # DOWNLOAD WITH PROFILE
     # ========================================================
 
     def _download_with_profile(
@@ -272,7 +435,13 @@ class MusicDownloader:
 
         import yt_dlp
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with yt_dlp.YoutubeDL(
+            opts
+        ) as ydl:
+
+            # ------------------------------------------------
+            # GET METADATA
+            # ------------------------------------------------
 
             info = ydl.extract_info(
                 url,
@@ -295,6 +464,10 @@ class MusicDownloader:
                     "YouTube video ID missing."
                 )
 
+            # ------------------------------------------------
+            # EXISTING FILE
+            # ------------------------------------------------
+
             existing = self._find_media(
                 video_id
             )
@@ -310,13 +483,25 @@ class MusicDownloader:
 
             else:
 
+                # --------------------------------------------
+                # REMOVE OLD PARTIAL FILES
+                # --------------------------------------------
+
                 self._remove_partial(
                     video_id
                 )
 
+                # --------------------------------------------
+                # DOWNLOAD
+                # --------------------------------------------
+
                 ydl.download(
                     [url]
                 )
+
+                # --------------------------------------------
+                # FIND DOWNLOADED FILE
+                # --------------------------------------------
 
                 path = self._find_media(
                     video_id
@@ -327,6 +512,10 @@ class MusicDownloader:
                     raise FileNotFoundError(
                         "yt-dlp produced no media."
                     )
+
+            # ------------------------------------------------
+            # VERIFY FILE
+            # ------------------------------------------------
 
             if not path.exists():
 
@@ -342,17 +531,21 @@ class MusicDownloader:
                     "Downloaded file is empty."
                 )
 
+            # ------------------------------------------------
+            # MAX FILE SIZE
+            # ------------------------------------------------
+
             if size > MAX_BYTES:
 
-                try:
+                logger.warning(
+                    "Downloaded media exceeds "
+                    "maximum size: %s bytes",
+                    size,
+                )
 
-                    path.unlink(
-                        missing_ok=True
-                    )
-
-                except Exception:
-
-                    pass
+                path.unlink(
+                    missing_ok=True
+                )
 
                 raise ValueError(
                     "Downloaded media exceeds "
@@ -365,33 +558,6 @@ class MusicDownloader:
             )
 
     # ========================================================
-    # ERROR CLASSIFICATION
-    # ========================================================
-
-    @staticmethod
-    def _is_youtube_auth_error(
-        error: Exception,
-    ) -> bool:
-
-        text = str(error).lower()
-
-        keywords = (
-            "sign in to confirm",
-            "not a bot",
-            "confirm you're not a bot",
-            "confirm you’re not a bot",
-            "cookies",
-            "po token",
-            "potoken",
-            "authentication required",
-        )
-
-        return any(
-            keyword in text
-            for keyword in keywords
-        )
-
-    # ========================================================
     # SYNC DOWNLOAD
     # ========================================================
 
@@ -401,13 +567,12 @@ class MusicDownloader:
         video: bool,
     ) -> tuple[str, dict]:
 
-        last_error: Optional[Exception] = None
+        last_error = None
 
-        # Keep this conservative.
-        #
-        # These are normal yt-dlp supported client
-        # configurations. We do not attempt to bypass
-        # YouTube anti-bot protections.
+        # ----------------------------------------------------
+        # CLIENT FALLBACKS
+        # ----------------------------------------------------
+
         clients = (
             "web",
             "android",
@@ -424,54 +589,33 @@ class MusicDownloader:
             try:
 
                 logger.info(
-                    "YouTube download client=%s video=%s",
-                    client,
-                    video,
-                )
-
-                result = (
-                    self._download_with_profile(
-                        url=url,
-                        video=video,
-                        opts=opts,
-                    )
-                )
-
-                logger.info(
-                    "YouTube download successful "
+                    "YouTube download "
                     "client=%s video=%s",
                     client,
                     video,
                 )
 
-                return result
+                return (
+                    self._download_with_profile(
+                        url,
+                        video,
+                        opts,
+                    )
+                )
 
             except Exception as exc:
 
                 last_error = exc
 
-                if self._is_youtube_auth_error(
-                    exc
-                ):
-
-                    logger.warning(
-                        "YouTube requires authentication "
-                        "or additional verification. "
-                        "client=%s",
-                        client,
-                    )
-
-                else:
-
-                    logger.warning(
-                        "Download failed client=%s: %s",
-                        client,
-                        exc,
-                    )
-
-                self._remove_partial_from_url(
-                    url
+                logger.warning(
+                    "Download failed client=%s: %s",
+                    client,
+                    exc,
                 )
+
+        # ----------------------------------------------------
+        # ALL FAILED
+        # ----------------------------------------------------
 
         if last_error:
 
@@ -480,48 +624,6 @@ class MusicDownloader:
         raise RuntimeError(
             "All YouTube download profiles failed."
         )
-
-    # ========================================================
-    # CLEAN PARTIAL FROM URL
-    # ========================================================
-
-    def _remove_partial_from_url(
-        self,
-        url: str,
-    ) -> None:
-
-        try:
-
-            import yt_dlp
-
-            with yt_dlp.YoutubeDL(
-                {
-                    "quiet": True,
-                    "no_warnings": True,
-                }
-            ) as ydl:
-
-                video_id = (
-                    ydl.extract_info(
-                        url,
-                        download=False,
-                    ).get("id")
-                )
-
-            if video_id:
-
-                self._remove_partial(
-                    str(video_id)
-                )
-
-        except Exception:
-
-            logger.debug(
-                "Could not cleanup partial YouTube "
-                "download for %s",
-                url,
-                exc_info=True,
-            )
 
     # ========================================================
     # YOUTUBE DOWNLOAD
@@ -535,6 +637,7 @@ class MusicDownloader:
     ) -> Optional[tuple[str, dict]]:
 
         if not url:
+
             return None
 
         try:
@@ -545,24 +648,12 @@ class MusicDownloader:
                 video,
             )
 
-        except Exception as exc:
+        except Exception:
 
-            if self._is_youtube_auth_error(
-                exc
-            ):
-
-                logger.error(
-                    "YouTube requires authentication "
-                    "or verification: %s",
-                    url,
-                )
-
-            else:
-
-                logger.exception(
-                    "YouTube download failed: %s",
-                    url,
-                )
+            logger.exception(
+                "YouTube download failed: %s",
+                url,
+            )
 
             return None
 
@@ -578,10 +669,11 @@ class MusicDownloader:
     ) -> Optional[str]:
 
         if track is None:
+
             return None
 
         # ----------------------------------------------------
-        # DICT
+        # DICT TRACK
         # ----------------------------------------------------
 
         if isinstance(
@@ -600,7 +692,7 @@ class MusicDownloader:
             )
 
         # ----------------------------------------------------
-        # OBJECT
+        # OBJECT TRACK
         # ----------------------------------------------------
 
         else:
@@ -623,33 +715,35 @@ class MusicDownloader:
 
         if path:
 
-            local = Path(path)
+            local = Path(
+                path
+            )
 
             if local.is_file():
 
-                try:
-
-                    if local.stat().st_size <= MAX_BYTES:
-
-                        return str(local)
-
-                except OSError:
-
-                    pass
+                return str(local)
 
         # ----------------------------------------------------
-        # URL
+        # URL REQUIRED
         # ----------------------------------------------------
 
         if not url:
+
             return None
 
-        result = await self.download_youtube(
-            url,
-            video=video,
+        # ----------------------------------------------------
+        # YOUTUBE DOWNLOAD
+        # ----------------------------------------------------
+
+        result = (
+            await self.download_youtube(
+                url,
+                video=video,
+            )
         )
 
         if not result:
+
             return None
 
         return result[0]
@@ -665,21 +759,25 @@ class MusicDownloader:
 
         try:
 
-            p = Path(path).resolve()
+            p = Path(
+                path
+            ).resolve()
 
             root = (
-                self.download_dir.resolve()
+                self.download_dir
+                .resolve()
             )
 
             # Security:
             # only delete files inside download dir.
-            p.relative_to(root)
 
-            if p.exists():
+            p.relative_to(
+                root
+            )
 
-                p.unlink(
-                    missing_ok=True
-                )
+            p.unlink(
+                missing_ok=True
+            )
 
             return True
 
@@ -714,21 +812,18 @@ class MusicDownloader:
         for path in files:
 
             if not path.is_file():
+
                 continue
 
             try:
 
                 path.unlink()
+
                 count += 1
 
             except OSError:
 
                 pass
-
-        logger.info(
-            "Music downloader cleanup: %s files removed.",
-            count,
-        )
 
         return count
 
@@ -761,7 +856,7 @@ def reset_downloader() -> None:
 
 
 # ============================================================
-# HELPER
+# SIMPLE DOWNLOAD HELPER
 # ============================================================
 
 async def download_track(
@@ -774,6 +869,10 @@ async def download_track(
         video=video,
     )
 
+
+# ============================================================
+# EXPORTS
+# ============================================================
 
 __all__ = [
     "MusicDownloader",
