@@ -13,11 +13,13 @@ from aiogram.types import (
 )
 
 from ai.brain import chat
+
 from ai.intent import (
     detect_intent,
     is_music_intent,
     MUSIC_PLAY,
     MUSIC_SEARCH,
+    MUSIC_VIDEO,
     MUSIC_PAUSE,
     MUSIC_RESUME,
     MUSIC_SKIP,
@@ -51,6 +53,9 @@ router = Router()
 async def ensure_user(
     message: Message,
 ) -> Optional[dict]:
+    """
+    Make sure Telegram user exists in MongoDB.
+    """
 
     if not message.from_user:
         return None
@@ -58,7 +63,6 @@ async def ensure_user(
     user_id = message.from_user.id
 
     try:
-
         user = await get_user(
             user_id
         )
@@ -74,7 +78,6 @@ async def ensure_user(
         )
 
     except Exception:
-
         logger.exception(
             "Failed to ensure user %s",
             user_id,
@@ -90,6 +93,9 @@ async def ensure_user(
 def is_group_message(
     message: Message,
 ) -> bool:
+    """
+    Check whether message was sent inside a group.
+    """
 
     if not message.chat:
         return False
@@ -103,15 +109,16 @@ def is_group_message(
 async def get_group_settings(
     chat_id: int,
 ) -> Optional[dict]:
+    """
+    Get stored group settings.
+    """
 
     try:
-
         return await get_group(
             chat_id
         )
 
     except Exception:
-
         logger.exception(
             "Failed to get group settings: %s",
             chat_id,
@@ -127,6 +134,9 @@ async def get_group_settings(
 def bot_is_mentioned(
     message: Message,
 ) -> bool:
+    """
+    Detect @mention in message.
+    """
 
     text = (
         message.text
@@ -149,7 +159,6 @@ def bot_is_mentioned(
             continue
 
         try:
-
             username = text[
                 entity.offset:
                 entity.offset + entity.length
@@ -167,6 +176,9 @@ def bot_is_mentioned(
 def is_reply_to_bot(
     message: Message,
 ) -> bool:
+    """
+    Check whether message is replying to a bot message.
+    """
 
     replied = message.reply_to_message
 
@@ -187,6 +199,13 @@ def should_answer_group(
     message: Message,
     group_settings: Optional[dict],
 ) -> bool:
+    """
+    Decide whether Zara should answer normal AI messages
+    inside a group.
+
+    Music commands are handled separately and do not require
+    mention/reply.
+    """
 
     if not group_settings:
         return True
@@ -195,7 +214,6 @@ def should_answer_group(
         "ai_enabled",
         True,
     ) is False:
-
         return False
 
     reply_to_all = group_settings.get(
@@ -226,6 +244,9 @@ def should_answer_group(
 async def get_reply_context(
     message: Message,
 ) -> Optional[str]:
+    """
+    Get text/caption from replied message.
+    """
 
     reply = message.reply_to_message
 
@@ -246,6 +267,11 @@ async def get_reply_context(
 def clean_message_text(
     message: Message,
 ) -> str:
+    """
+    Clean Telegram message text.
+
+    Removes @mentions from the text.
+    """
 
     text = (
         message.text
@@ -277,8 +303,13 @@ def clean_message_text(
 # ============================================================
 
 async def _music_services():
+    """
+    Get normal music services.
+    """
 
-    from telegram.client import get_music_services
+    from telegram.client import (
+        get_music_services,
+    )
 
     return get_music_services()
 
@@ -291,6 +322,9 @@ async def handle_music_intent(
     message: Message,
     intent: str,
 ) -> bool:
+    """
+    Handle text-based music commands.
+    """
 
     if not message.from_user:
         return False
@@ -313,10 +347,15 @@ async def handle_music_intent(
             message
         )
 
-        if intent in (
+        # ====================================================
+        # PLAY / SEARCH / VIDEO
+        # ====================================================
+
+        if intent in {
             MUSIC_SEARCH,
             MUSIC_PLAY,
-        ):
+            MUSIC_VIDEO,
+        }:
 
             query = text
 
@@ -329,6 +368,8 @@ async def handle_music_intent(
                 "find song",
                 "find music",
                 "search music",
+                "play song",
+                "play music",
                 "play",
                 "chalao",
                 "chala",
@@ -337,6 +378,10 @@ async def handle_music_intent(
                 "song chala",
                 "gana chala",
                 "gaana chala",
+                "video chalao",
+                "video bajao",
+                "video play",
+                "video dikhao",
             )
 
             lowered = query.lower()
@@ -355,6 +400,10 @@ async def handle_music_intent(
 
                     break
 
+            # ------------------------------------------------
+            # No query
+            # ------------------------------------------------
+
             if not query:
 
                 current = player.current(
@@ -366,9 +415,31 @@ async def handle_music_intent(
                     and intent == MUSIC_PLAY
                 ):
 
-                    ok = await player.play_current(
+                    play_current = getattr(
+                        player,
+                        "play_current",
+                        None,
+                    )
+
+                    if play_current is None:
+
+                        await message.answer(
+                            "❌ Current song ko play karne ka option available nahi hai."
+                        )
+
+                        return True
+
+                    result = play_current(
                         chat_id
                     )
+
+                    if hasattr(
+                        result,
+                        "__await__",
+                    ):
+                        ok = await result
+                    else:
+                        ok = bool(result)
 
                     await message.answer(
                         "▶️ Playing current song."
@@ -385,60 +456,21 @@ async def handle_music_intent(
 
                 return True
 
-            result = await searcher.first(
-                query
-            )
-
-            if not result:
-
-                await message.answer(
-                    "❌ Song nahi mila."
-                )
-
-                return True
-
-            path = await downloader.download(
-                result
-            )
-
-            if not path:
-
-                await message.answer(
-                    "❌ Song download nahi ho paya."
-                )
-
-                return True
-
-            result.metadata[
-                "telegram_message"
-            ] = None
-
-            from music.queue import Track
-
-            track = Track(
-                title=result.title,
-                url=result.url,
-                audio_url=result.url,
-                audio_path=path,
-                duration=result.duration,
-                requested_by=message.from_user.id,
-                requested_by_name=message.from_user.full_name,
-                source=result.source,
-                metadata=result.metadata,
-            )
-
-            max_queue = 10
+            # ------------------------------------------------
+            # Queue limit
+            # ------------------------------------------------
 
             try:
-
-                from config import MUSIC_MAX_QUEUE
+                from config import (
+                    MUSIC_MAX_QUEUE,
+                )
 
                 max_queue = int(
                     MUSIC_MAX_QUEUE
                 )
 
             except Exception:
-                pass
+                max_queue = 10
 
             if player.queue_size(
                 chat_id
@@ -450,20 +482,163 @@ async def handle_music_intent(
 
                 return True
 
-            pos = await player.add(
+            # ------------------------------------------------
+            # SEARCH
+            # ------------------------------------------------
+
+            result = await searcher.first(
+                query
+            )
+
+            if not result:
+
+                await message.answer(
+                    f"❌ <b>{query}</b> nahi mila."
+                )
+
+                return True
+
+            # ------------------------------------------------
+            # DOWNLOAD
+            # ------------------------------------------------
+
+            is_video = (
+                intent == MUSIC_VIDEO
+            )
+
+            try:
+
+                if is_video:
+
+                    try:
+
+                        path = await downloader.download(
+                            result,
+                            video=True,
+                        )
+
+                    except TypeError:
+
+                        logger.warning(
+                            "Downloader does not support video=True. "
+                            "Falling back to normal download."
+                        )
+
+                        path = await downloader.download(
+                            result
+                        )
+
+                else:
+
+                    path = await downloader.download(
+                        result
+                    )
+
+            except Exception:
+
+                logger.exception(
+                    "Music download failed: %s",
+                    result.title,
+                )
+
+                await message.answer(
+                    "❌ Song download nahi ho paya."
+                )
+
+                return True
+
+            if not path:
+
+                await message.answer(
+                    "❌ Song/media download nahi ho paya."
+                )
+
+                return True
+
+            # ------------------------------------------------
+            # TRACK
+            # ------------------------------------------------
+
+            try:
+                result.metadata[
+                    "telegram_message"
+                ] = None
+
+            except Exception:
+                pass
+
+            from music.queue import Track
+
+            metadata = {}
+
+            try:
+                metadata.update(
+                    result.metadata or {}
+                )
+            except Exception:
+                pass
+
+            track = Track(
+                title=result.title,
+                url=result.url,
+                audio_url=result.url,
+                audio_path=path,
+                duration=result.duration,
+                requested_by=message.from_user.id,
+                requested_by_name=(
+                    message.from_user.full_name
+                ),
+                thumbnail=getattr(
+                    result,
+                    "thumbnail",
+                    None,
+                ),
+                source=getattr(
+                    result,
+                    "source",
+                    None,
+                ),
+                media_type=(
+                    "video"
+                    if is_video
+                    else "audio"
+                ),
+                metadata=metadata,
+            )
+
+            # ------------------------------------------------
+            # PLAY / QUEUE
+            # ------------------------------------------------
+
+            was_playing = player.is_playing(
+                chat_id
+            )
+
+            position = await player.add(
                 chat_id,
                 track,
-                play_now=not player.is_playing(
-                    chat_id
-                ),
+                play_now=not was_playing,
             )
 
-            await message.answer(
-                f"🎵 <b>{result.title}</b>\n"
-                f"Queue position: <b>{pos}</b>"
-            )
+            if not was_playing:
+
+                await message.answer(
+                    f"🎵 <b>{result.title}</b>\n"
+                    "▶️ Abhi play ho raha hai."
+                )
+
+            else:
+
+                await message.answer(
+                    f"🎵 <b>{result.title}</b>\n"
+                    f"⏭️ Queue position: <b>{position}</b>"
+                )
 
             return True
+
+        # ====================================================
+        # PAUSE
+        # ====================================================
 
         if intent == MUSIC_PAUSE:
 
@@ -480,6 +655,10 @@ async def handle_music_intent(
 
             return True
 
+        # ====================================================
+        # RESUME
+        # ====================================================
+
         if intent == MUSIC_RESUME:
 
             ok = await controls.resume(
@@ -494,6 +673,10 @@ async def handle_music_intent(
             )
 
             return True
+
+        # ====================================================
+        # SKIP
+        # ====================================================
 
         if intent == MUSIC_SKIP:
 
@@ -510,6 +693,10 @@ async def handle_music_intent(
 
             return True
 
+        # ====================================================
+        # STOP
+        # ====================================================
+
         if intent == MUSIC_STOP:
 
             await controls.stop(
@@ -523,13 +710,26 @@ async def handle_music_intent(
 
             return True
 
+        # ====================================================
+        # QUEUE
+        # ====================================================
+
         if intent == MUSIC_QUEUE:
 
             q = controls.queue(
                 chat_id
             )
 
-            if not q:
+            current = None
+
+            try:
+                current = player.current(
+                    chat_id
+                )
+            except Exception:
+                pass
+
+            if not q and not current:
 
                 await message.answer(
                     "📭 Queue empty hai."
@@ -538,8 +738,14 @@ async def handle_music_intent(
                 return True
 
             lines = [
-                "🎵 <b>Queue</b>"
+                "🎵 <b>Zara Music Queue</b>"
             ]
+
+            if current:
+
+                lines.append(
+                    f"▶️ Now: <b>{current.title}</b>"
+                )
 
             for i, track in enumerate(
                 q,
@@ -557,6 +763,10 @@ async def handle_music_intent(
             )
 
             return True
+
+        # ====================================================
+        # REMOVE
+        # ====================================================
 
         if intent == MUSIC_REMOVE:
 
@@ -684,7 +894,7 @@ async def join_voice_chat(
     try:
 
         from telegram.client import (
-            get_voice_music_services
+            get_voice_music_services,
         )
 
         receiver, _ = (
@@ -758,7 +968,7 @@ async def end_voice_chat(
     try:
 
         from telegram.client import (
-            get_voice_music_services
+            get_voice_music_services,
         )
 
         receiver, _ = (
@@ -766,6 +976,10 @@ async def end_voice_chat(
         )
 
         chat_id = message.chat.id
+
+        # ----------------------------------------------------
+        # Stop music first
+        # ----------------------------------------------------
 
         try:
 
@@ -787,6 +1001,10 @@ async def end_voice_chat(
                 "Music cleanup during /end failed.",
                 exc_info=True,
             )
+
+        # ----------------------------------------------------
+        # Leave VC
+        # ----------------------------------------------------
 
         await receiver.leave(
             chat_id
@@ -869,7 +1087,7 @@ async def music_use_mode(
     try:
 
         from database.groups import (
-            get_group_setting
+            get_group_setting,
         )
 
         mode = await get_group_setting(
@@ -917,6 +1135,13 @@ async def music_mode_callback(
 
     try:
 
+        if not callback.data:
+            await callback.answer(
+                "Invalid callback.",
+                show_alert=True,
+            )
+            return
+
         _, mode, chat_id_raw = (
             callback.data.split(
                 ":",
@@ -934,7 +1159,7 @@ async def music_mode_callback(
         )
 
         from telegram.client import (
-            get_voice_music_services
+            get_voice_music_services,
         )
 
         _, controller = (
@@ -951,6 +1176,22 @@ async def music_mode_callback(
 
             await callback.answer(
                 "Voice music mode API unavailable.",
+                show_alert=True,
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # Validate mode
+        # ----------------------------------------------------
+
+        if mode not in {
+            MODE_ALL,
+            MODE_ADMIN,
+        }:
+
+            await callback.answer(
+                "Invalid mode.",
                 show_alert=True,
             )
 
@@ -1023,19 +1264,17 @@ async def handle_text_message(
         message.from_user.id
     )
 
-    # --------------------------------------------------------
-    # Ensure user
-    # --------------------------------------------------------
+    # ========================================================
+    # ENSURE USER
+    # ========================================================
 
-    user = await ensure_user(
+    await ensure_user(
         message
     )
 
-    # -------------------------------------------
-
-    # --------------------------------------------------------
+    # ========================================================
     # GROUP DATA
-    # --------------------------------------------------------
+    # ========================================================
 
     group_settings = None
 
@@ -1053,18 +1292,20 @@ async def handle_text_message(
         # MUSIC COMMANDS
         #
         # Music commands do NOT require:
+        #
         # - @Zara mention
-        # - reply to Zara
+        # - Reply to Zara
         #
         # Examples:
-        # /play Arijit Singh
+        #
         # play Arijit Singh
+        # gana chalao Kesariya
         # pause
         # resume
         # skip
         # stop music
         # queue
-        # remove
+        # remove song
         # ----------------------------------------------------
 
         try:
@@ -1092,26 +1333,18 @@ async def handle_text_message(
             )
 
         # ----------------------------------------------------
-        # Normal AI messages still follow the normal
-        # group mention/reply/permission rules.
+        # Normal AI messages still follow group rules.
         # ----------------------------------------------------
 
         if not should_answer_group(
             message,
             group_settings,
         ):
-
             return
 
-    # --------------------------------------------------------
-    # NON-GROUP MUSIC COMMANDS
-    # --------------------------------------------------------
-    #
-    # Allow music commands in private chat too.
-    # This is useful for testing the music system.
-    #
-    # Group music commands were already handled above.
-    # --------------------------------------------------------
+    # ========================================================
+    # PRIVATE CHAT MUSIC COMMANDS
+    # ========================================================
 
     else:
 
@@ -1139,17 +1372,9 @@ async def handle_text_message(
                 "Music command handling failed."
             )
 
-    # --------------------------------------------------------
+    # ========================================================
     # NORMAL AI MESSAGE
-    # --------------------------------------------------------
-    #
-    # If the message reached here:
-    #
-    # - It was not handled as a music command
-    # - OR it is a normal AI message
-    #
-    # Group permission rules have already been checked above.
-    # --------------------------------------------------------
+    # ========================================================
 
     try:
 
@@ -1184,4 +1409,22 @@ async def handle_text_message(
 
         await message.answer(
             "Sorry, abhi Zara response nahi de pa rahi hai."
-                )    
+        )
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+
+__all__ = [
+    "router",
+    "ensure_user",
+    "is_group_message",
+    "get_group_settings",
+    "bot_is_mentioned",
+    "is_reply_to_bot",
+    "should_answer_group",
+    "get_reply_context",
+    "clean_message_text",
+    "handle_music_intent",
+]
