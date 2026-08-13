@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 from pathlib import Path
 from typing import Optional
 
@@ -11,7 +10,15 @@ logger = logging.getLogger(__name__)
 
 
 class AudioStream:
-    """Zara music playback engine for PyTgCalls 2.x."""
+    """
+    Actual Zara VC playback engine.
+
+    PyTgCalls 2.3.3:
+        play(chat_id, MediaStream(...))
+
+    This call establishes the media connection and starts
+    playback in the active Telegram VC.
+    """
 
     def __init__(
         self,
@@ -27,24 +34,90 @@ class AudioStream:
 
         self._locks: dict[int, asyncio.Lock] = {}
 
-    def _lock(self, chat_id: int) -> asyncio.Lock:
+    def _lock(
+        self,
+        chat_id: int,
+    ) -> asyncio.Lock:
+
         return self._locks.setdefault(
             int(chat_id),
             asyncio.Lock(),
         )
 
+    # ========================================================
+    # START
+    # ========================================================
+
     async def start(self) -> None:
+
         try:
+
             result = self.calls.start()
 
-            if hasattr(result, "__await__"):
+            if hasattr(
+                result,
+                "__await__",
+            ):
                 await result
 
-            logger.info("PyTgCalls started successfully.")
+            logger.info(
+                "PyTgCalls started successfully."
+            )
 
         except Exception:
-            logger.exception("Failed to start PyTgCalls.")
+            logger.exception(
+                "Failed to start PyTgCalls."
+            )
             raise
+
+    # ========================================================
+    # ACTIVE VC
+    # ========================================================
+
+    async def _has_active_call(
+        self,
+        chat_id: int,
+    ) -> bool:
+
+        try:
+
+            group_calls = getattr(
+                self.calls,
+                "group_calls",
+                None,
+            )
+
+            if group_calls is None:
+                return True
+
+            if callable(group_calls):
+
+                result = group_calls()
+
+                if hasattr(
+                    result,
+                    "__await__",
+                ):
+                    result = await result
+
+                group_calls = result
+
+            return int(chat_id) in group_calls
+
+        except Exception:
+
+            # Do not block playback solely because the
+            # inspection API is unavailable.
+            logger.debug(
+                "Active VC inspection unavailable.",
+                exc_info=True,
+            )
+
+            return True
+
+    # ========================================================
+    # PLAY
+    # ========================================================
 
     async def play(
         self,
@@ -57,10 +130,16 @@ class AudioStream:
         chat_id = int(chat_id)
 
         if not media_path:
-            logger.error("PLAY FAILED: empty media path.")
+
+            logger.error(
+                "PLAY FAILED: empty media path."
+            )
+
             return False
 
-        path = Path(media_path).resolve()
+        path = Path(
+            media_path
+        ).resolve()
 
         logger.info(
             "PLAY REQUEST chat=%s path=%s video=%s",
@@ -69,65 +148,102 @@ class AudioStream:
             video,
         )
 
+        # ----------------------------------------------------
+        # File validation
+        # ----------------------------------------------------
+
         if not path.exists():
+
             logger.error(
                 "PLAY FAILED: file does not exist: %s",
                 path,
             )
+
             return False
 
         if not path.is_file():
+
             logger.error(
-                "PLAY FAILED: path is not a file: %s",
+                "PLAY FAILED: not a file: %s",
                 path,
             )
+
             return False
 
         try:
+
             size = path.stat().st_size
 
+            if size <= 0:
+
+                logger.error(
+                    "PLAY FAILED: empty file: %s",
+                    path,
+                )
+
+                return False
+
             logger.info(
-                "PLAY FILE chat=%s size=%s bytes suffix=%s",
+                "PLAY FILE chat=%s size=%s suffix=%s",
                 chat_id,
                 size,
                 path.suffix,
             )
 
-            if size <= 0:
-                logger.error(
-                    "PLAY FAILED: empty file: %s",
-                    path,
-                )
-                return False
-
         except Exception:
+
             logger.exception(
                 "PLAY FAILED: unable to inspect file."
             )
+
             return False
 
-        async with self._lock(chat_id):
+        # ----------------------------------------------------
+        # Active VC check
+        # ----------------------------------------------------
+
+        if not await self._has_active_call(
+            chat_id
+        ):
+
+            logger.error(
+                "PLAY FAILED: no active Voice Chat: %s",
+                chat_id,
+            )
+
+            return False
+
+        async with self._lock(
+            chat_id
+        ):
 
             try:
-                # ---------------------------------------------
-                # IMPORTANT:
-                # Stop any previous stream first.
-                # ---------------------------------------------
+
+                # ------------------------------------------------
+                # Stop previous media
+                # ------------------------------------------------
 
                 if chat_id in self.current_streams:
 
                     logger.info(
-                        "Stopping previous stream before new playback: %s",
+                        "Stopping previous stream: %s",
                         chat_id,
                     )
 
                     try:
-                        result = self.calls.leave_call(chat_id)
 
-                        if hasattr(result, "__await__"):
+                        result = self.calls.leave_call(
+                            chat_id
+                        )
+
+                        if hasattr(
+                            result,
+                            "__await__",
+                        ):
                             await result
 
                     except Exception:
+
                         logger.debug(
                             "Previous call cleanup failed.",
                             exc_info=True,
@@ -143,50 +259,67 @@ class AudioStream:
                         None,
                     )
 
-                    await asyncio.sleep(0.3)
+                    self.connected_chats.discard(
+                        chat_id
+                    )
 
-                # ---------------------------------------------
-                # AUDIO ONLY
-                # ---------------------------------------------
+                    await asyncio.sleep(
+                        0.25
+                    )
 
-                logger.info(
-                    "Creating MediaStream for chat=%s",
-                    chat_id,
-                )
+                # ------------------------------------------------
+                # CREATE MEDIA STREAM
+                # ------------------------------------------------
 
                 if video:
-                    stream = MediaStream(
-                        str(path),
+
+                    logger.info(
+                        "Creating VIDEO MediaStream: %s",
+                        path,
                     )
+
+                    stream = MediaStream(
+                        str(path)
+                    )
+
                 else:
+
+                    logger.info(
+                        "Creating AUDIO MediaStream: %s",
+                        path,
+                    )
+
                     try:
+
                         stream = MediaStream(
                             str(path),
-                            video_flags=MediaStream.Flags.IGNORE,
+                            video_flags=(
+                                MediaStream.Flags.IGNORE
+                            ),
                         )
+
                     except Exception:
-                        logger.warning(
-                            "Audio MediaStream Flags.IGNORE unavailable; "
-                            "using basic MediaStream.",
+
+                        logger.debug(
+                            "Audio-only MediaStream flag unavailable; "
+                            "using normal MediaStream.",
                             exc_info=True,
                         )
 
                         stream = MediaStream(
-                            str(path),
+                            str(path)
                         )
 
-                logger.info(
-                    "MediaStream created successfully for chat=%s",
-                    chat_id,
-                )
-
-                # ---------------------------------------------
-                # PLAY
-                # ---------------------------------------------
+                # ------------------------------------------------
+                # ACTUAL JOIN + PLAY
+                # ------------------------------------------------
 
                 logger.info(
-                    "Calling PyTgCalls.play(chat=%s)...",
+                    "Starting PyTgCalls playback: "
+                    "chat=%s video=%s file=%s",
                     chat_id,
+                    video,
+                    path,
                 )
 
                 result = self.calls.play(
@@ -194,24 +327,57 @@ class AudioStream:
                     stream,
                 )
 
-                if hasattr(result, "__await__"):
+                if hasattr(
+                    result,
+                    "__await__",
+                ):
                     await result
 
+                # ------------------------------------------------
+                # SUCCESS
+                # ------------------------------------------------
+
+                self.current_streams[
+                    chat_id
+                ] = str(path)
+
+                self.current_media[
+                    chat_id
+                ] = (
+                    "video"
+                    if video
+                    else "audio"
+                )
+
+                self.connected_chats.add(
+                    chat_id
+                )
+
                 logger.info(
-                    "PyTgCalls.play() returned successfully for chat=%s",
+                    "================================================"
+                )
+
+                logger.info(
+                    "MUSIC PLAYING SUCCESS"
+                )
+
+                logger.info(
+                    "chat=%s",
                     chat_id,
                 )
 
-                self.current_streams[chat_id] = str(path)
-                self.current_media[chat_id] = (
-                    "video" if video else "audio"
+                logger.info(
+                    "media=%s",
+                    "video" if video else "audio",
                 )
-                self.connected_chats.add(chat_id)
 
                 logger.info(
-                    "MUSIC PLAYING SUCCESS chat=%s file=%s",
-                    chat_id,
+                    "file=%s",
                     path,
+                )
+
+                logger.info(
+                    "================================================"
                 )
 
                 return True
@@ -219,7 +385,7 @@ class AudioStream:
             except Exception as exc:
 
                 logger.exception(
-                    "!!! PYTGCALLS PLAYBACK FAILED !!! "
+                    "PYTGCALLS PLAYBACK FAILED "
                     "chat=%s file=%s error=%r",
                     chat_id,
                     path,
@@ -236,7 +402,15 @@ class AudioStream:
                     None,
                 )
 
+                self.connected_chats.discard(
+                    chat_id
+                )
+
                 return False
+
+    # ========================================================
+    # STOP
+    # ========================================================
 
     async def stop(
         self,
@@ -246,17 +420,23 @@ class AudioStream:
         chat_id = int(chat_id)
 
         try:
-            result = self.calls.leave_call(chat_id)
 
-            if hasattr(result, "__await__"):
+            result = self.calls.leave_call(
+                chat_id
+            )
+
+            if hasattr(
+                result,
+                "__await__",
+            ):
                 await result
 
             logger.info(
-                "VC playback stopped for chat %s",
+                "VC playback stopped: %s",
                 chat_id,
             )
 
-            success = True
+            return True
 
         except Exception as exc:
 
@@ -266,9 +446,10 @@ class AudioStream:
                 exc,
             )
 
-            success = False
+            return False
 
         finally:
+
             self.current_streams.pop(
                 chat_id,
                 None,
@@ -280,10 +461,12 @@ class AudioStream:
             )
 
             self.connected_chats.discard(
-                chat_id,
+                chat_id
             )
 
-        return success
+    # ========================================================
+    # PAUSE
+    # ========================================================
 
     async def pause(
         self,
@@ -291,26 +474,36 @@ class AudioStream:
     ) -> bool:
 
         try:
+
             result = self.calls.pause(
-                int(chat_id),
+                int(chat_id)
             )
 
-            if hasattr(result, "__await__"):
+            if hasattr(
+                result,
+                "__await__",
+            ):
                 await result
 
             logger.info(
-                "Paused media in VC %s",
+                "Paused VC media: %s",
                 chat_id,
             )
 
             return True
 
         except Exception:
+
             logger.exception(
-                "Failed pausing media in VC %s",
+                "Failed pausing VC media: %s",
                 chat_id,
             )
+
             return False
+
+    # ========================================================
+    # RESUME
+    # ========================================================
 
     async def resume(
         self,
@@ -318,26 +511,36 @@ class AudioStream:
     ) -> bool:
 
         try:
+
             result = self.calls.resume(
-                int(chat_id),
+                int(chat_id)
             )
 
-            if hasattr(result, "__await__"):
+            if hasattr(
+                result,
+                "__await__",
+            ):
                 await result
 
             logger.info(
-                "Resumed media in VC %s",
+                "Resumed VC media: %s",
                 chat_id,
             )
 
             return True
 
         except Exception:
+
             logger.exception(
-                "Failed resuming media in VC %s",
+                "Failed resuming VC media: %s",
                 chat_id,
             )
+
             return False
+
+    # ========================================================
+    # CHANGE
+    # ========================================================
 
     async def change_stream(
         self,
@@ -347,9 +550,13 @@ class AudioStream:
         video: bool = False,
     ) -> bool:
 
-        await self.stop(chat_id)
+        await self.stop(
+            chat_id
+        )
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(
+            0.4
+        )
 
         return await self.play(
             chat_id,
@@ -357,39 +564,54 @@ class AudioStream:
             video=video,
         )
 
+    # ========================================================
+    # STATE
+    # ========================================================
+
     def is_playing(
         self,
         chat_id: int,
     ) -> bool:
+
         return int(chat_id) in self.current_streams
 
     def is_connected(
         self,
         chat_id: int,
     ) -> bool:
+
         return int(chat_id) in self.connected_chats
 
     def get_current_stream(
         self,
         chat_id: int,
     ) -> Optional[str]:
+
         return self.current_streams.get(
-            int(chat_id),
+            int(chat_id)
         )
 
     def get_current_media_type(
         self,
         chat_id: int,
     ) -> Optional[str]:
+
         return self.current_media.get(
-            int(chat_id),
+            int(chat_id)
         )
 
     async def leave(
         self,
         chat_id: int,
     ) -> bool:
-        return await self.stop(chat_id)
+
+        return await self.stop(
+            chat_id
+        )
+
+    # ========================================================
+    # CLEANUP
+    # ========================================================
 
     async def cleanup(self) -> None:
 
@@ -401,10 +623,18 @@ class AudioStream:
             self.connected_chats
         )
 
-        for chat_id in list(chat_ids):
+        for chat_id in list(
+            chat_ids
+        ):
+
             try:
-                await self.stop(chat_id)
+
+                await self.stop(
+                    chat_id
+                )
+
             except Exception:
+
                 logger.exception(
                     "Failed cleaning VC %s",
                     chat_id,
@@ -420,4 +650,6 @@ class AudioStream:
         )
 
 
-__all__ = ["AudioStream"]
+__all__ = [
+    "AudioStream",
+]
