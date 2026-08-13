@@ -959,80 +959,72 @@ async def handle_music_intent(
                 metadata=metadata,
             )
 
-            # ------------------------------------------------
-            # WAIT FOR VC JOIN
-            # ------------------------------------------------
+            
+# ------------------------------------------------
+# WAIT FOR VC JOIN
+# ------------------------------------------------
 
-            if join_task:
+if join_task:
 
-                try:
+    try:
+        joined = await join_task
 
-                    joined = await join_task
+    except Exception:
 
-                except Exception:
+        logger.exception(
+            "VC join failed."
+        )
 
-                    logger.exception(
-                        "VC join failed."
-                    )
+        joined = False
 
-                    joined = False
+    if not joined:
 
-                if not joined:
+        try:
+            await downloader.delete(path)
+        except Exception:
+            logger.debug(
+                "Failed cleaning downloaded file "
+                "after VC join failure.",
+                exc_info=True,
+            )
 
-                    try:
+        if processing:
 
-                        await downloader.delete(
-                            path
-                        )
+            try:
+                await processing.delete()
+            except Exception:
+                pass
 
-                    except Exception:
+        await message.bot.send_message(
+            chat_id,
+            "❌ <b>Zara could not join the voice chat.</b>\n\n"
+            "Please make sure Zara is in the group, "
+            "is not banned, and a voice chat is active.",
+        )
 
-                        logger.debug(
-                            "Failed cleaning downloaded "
-                            "file after VC join failure.",
-                            exc_info=True,
-                        )
+        return True
 
-                    if processing:
+else:
 
-                        try:
-                            await processing.delete()
-                        except Exception:
-                            pass
+    try:
+        await downloader.delete(path)
+    except Exception:
+        pass
 
-                    await message.bot.send_message(
-                        chat_id,
-                        "❌ Zara could not join the voice chat.",
-                    )
+    if processing:
 
-                    return True
+        try:
+            await processing.delete()
+        except Exception:
+            pass
 
-            else:
+    await message.bot.send_message(
+        chat_id,
+        "❌ <b>Zara voice chat system is unavailable.</b>",
+    )
 
-                # No receiver available.
-                try:
-
-                    await downloader.delete(
-                        path
-                    )
-
-                except Exception:
-
-                    pass
-
-                if processing:
-
-                    try:
-                        await processing.delete()
-                    except Exception:
-                        pass
-
-                await message.bot.send_message(
-                    chat_id,
-                    "❌ Zara voice chat system is unavailable.",
-                )
-
-                return True
+    return True
+            
 
             # ------------------------------------------------
             # ADD TO PLAYER
